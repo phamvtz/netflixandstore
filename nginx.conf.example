@@ -1,0 +1,96 @@
+# nginx.conf.example — Copy vào /etc/nginx/sites-available/netflix
+# Domain: coldbrewga.xyz
+#
+# Cách dùng:
+#   sudo cp nginx.conf.example /etc/nginx/sites-available/netflix
+#   sudo ln -s /etc/nginx/sites-available/netflix /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#   sudo certbot --nginx -d coldbrewga.xyz -d www.coldbrewga.xyz
+
+# Redirect www → non-www
+server {
+    listen 80;
+    listen [::]:80;
+    server_name www.coldbrewga.xyz;
+    return 301 https://coldbrewga.xyz$request_uri;
+}
+
+# Redirect HTTP → HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name coldbrewga.xyz;
+    return 301 https://$host$request_uri;
+}
+
+# Main HTTPS server (Certbot sẽ inject SSL certificate vào đây)
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name coldbrewga.xyz;
+
+    # SSL — Certbot tự điền sau khi chạy certbot --nginx
+    # ssl_certificate     /etc/letsencrypt/live/coldbrewga.xyz/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/coldbrewga.xyz/privkey.pem;
+
+    # ── Compression ──────────────────────────────────────────
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/javascript
+               text/xml application/xml image/svg+xml font/woff2;
+    gzip_min_length 1024;
+
+    # ── Security headers ─────────────────────────────────────
+    # Buộc HTTPS trong 1 năm (bao gồm subdomains)
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    # Chặn clickjacking
+    add_header X-Frame-Options "SAMEORIGIN" always;
+
+    # Chặn MIME sniffing
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # Kiểm soát Referrer
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Giới hạn quyền browser (tắt camera, mic, geolocation nếu không dùng)
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+    # Content Security Policy — cho phép Supabase + Google Fonts + VietQR
+    add_header Content-Security-Policy "
+        default-src 'self';
+        script-src  'self' 'unsafe-inline';
+        style-src   'self' 'unsafe-inline' https://fonts.googleapis.com;
+        font-src    'self' https://fonts.gstatic.com;
+        img-src     'self' data: https://img.vietqr.io https://*.supabase.co;
+        connect-src 'self' https://*.supabase.co https://my.sepay.vn;
+        frame-ancestors 'none';
+    " always;
+
+    # ── Proxy đến Express ────────────────────────────────────
+    location / {
+        proxy_pass         http://localhost:3001;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade           $http_upgrade;
+        proxy_set_header   Connection        'upgrade';
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 120s;
+
+        # Body size tối đa (phòng upload cookie lớn)
+        client_max_body_size 2m;
+    }
+
+    # ── Cache static assets từ Express build ─────────────────
+    location ~* \.(js|css|woff2?|svg|png|ico)$ {
+        proxy_pass       http://localhost:3001;
+        expires          7d;
+        add_header       Cache-Control "public, immutable";
+        access_log       off;
+    }
+}
