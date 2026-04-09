@@ -41,6 +41,7 @@ export function renderFooter() {
             <a href="#/">Trang chủ</a>
             <a href="#/plans">Bảng giá</a>
             <a href="#/tools">Tiện ích</a>
+            <a href="#/api-docs">API / Nhà phát triển</a>
             <a href="#/dashboard">Tài khoản</a>
             <a href="#/login">Đăng nhập</a>
           </div>

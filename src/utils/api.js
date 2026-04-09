@@ -18,8 +18,13 @@ export async function getPlans() {
     .select('*')
     .order('price', { ascending: true })
   if (error) throw error
-  return data
+  // Sort client-side by service after fetch (safe if column missing)
+  return (data || []).sort((a, b) => {
+    const sa = a.service || 'netflix', sb = b.service || 'netflix'
+    return sa < sb ? -1 : sa > sb ? 1 : (a.price||0) - (b.price||0)
+  })
 }
+
 
 export async function getPlan(planId) {
   const { data, error } = await supabase
@@ -32,9 +37,17 @@ export async function getPlan(planId) {
 }
 
 export async function adminCreatePlan(plan) {
+  // Đảm bảo các field mới có giá trị mặc định
+  const row = {
+    service:          plan.service          || 'netflix',
+    fulfillment_type: plan.fulfillment_type || (plan.service === 'netflix' ? 'netflix' : 'manual'),
+    account_type:     plan.account_type     || 'shared',
+    ...plan
+  }
+  if (row.is_visible === undefined) row.is_visible = true
   const { data, error } = await supabase
     .from('plans')
-    .insert(plan)
+    .insert(row)
     .select()
     .single()
   if (error) throw error
@@ -53,6 +66,20 @@ export async function adminUpdatePlan(id, updates) {
 }
 
 export async function adminDeletePlan(id) {
+  // Kiểm tra xem có subscription nào đang dùng gói này không
+  const { count, error: countErr } = await supabase
+    .from('subscriptions')
+    .select('id', { count: 'exact', head: true })
+    .eq('plan', id)
+  if (countErr) throw countErr
+
+  if (count && count > 0) {
+    throw new Error(
+      `Không thể xóa — còn ${count} đơn hàng đang dùng gói này.\n` +
+      `Nếu muốn ẩn gói, hãy đổi tên thành "[Đã ẩn] ..." thay vì xóa.`
+    )
+  }
+
   const { error } = await supabase.from('plans').delete().eq('id', id)
   if (error) throw error
 }
@@ -86,7 +113,7 @@ export async function updateSettings(obj) {
 export async function adminGetSettings() {
   const r = await adminApiFetch('/api/admin/settings')
   const text = await r.text()
-  let j = {}
+  let j
   try {
     j = text ? JSON.parse(text) : {}
   } catch {
@@ -104,7 +131,7 @@ export async function adminPatchSettings(partial) {
     body: JSON.stringify(partial)
   })
   const text = await r.text()
-  let j = {}
+  let j
   try {
     j = text ? JSON.parse(text) : {}
   } catch {
@@ -114,13 +141,30 @@ export async function adminPatchSettings(partial) {
   return j
 }
 
+/** Công khai: bài hướng dẫn (chỉ bài published) — GET /api/guides */
+export async function fetchGuides() {
+  const r = await fetch('/api/guides')
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = {}
+  }
+  if (!r.ok) throw new Error(j.message || j.error || `Không tải hướng dẫn (${r.status})`)
+  return j
+}
+
 // ==================== SUBSCRIPTIONS ====================
-export async function createSubscription(userId, planId) {
-  const { data, error } = await supabase
-    .from('subscriptions')
-    .insert({ user_id: userId, plan: planId, status: 'pending' })
-    .select()
-    .single()
+/**
+ * @param {string} userId
+ * @param {string} planId
+ * @param {{ sellerStoreId?: string }} [opts] — từ gian hàng #/s/:slug
+ */
+export async function createSubscription(userId, planId, opts = {}) {
+  const row = { user_id: userId, plan: planId, status: 'pending' }
+  if (opts.sellerStoreId) row.seller_store_id = opts.sellerStoreId
+  const { data, error } = await supabase.from('subscriptions').insert(row).select().single()
   if (error) throw error
   return data
 }
@@ -146,20 +190,21 @@ export async function getSubscription(id) {
 }
 
 // ==================== PAYMENTS ====================
-export async function createPayment(userId, subscriptionId, amount, planId, method, transferContent) {
-  const { data, error } = await supabase
-    .from('payments')
-    .insert({
-      user_id: userId,
-      subscription_id: subscriptionId,
-      amount,
-      plan: planId,
-      method,
-      transfer_content: transferContent,
-      status: 'pending'
-    })
-    .select()
-    .single()
+/**
+ * @param {{ sellerStoreId?: string }} [opts]
+ */
+export async function createPayment(userId, subscriptionId, amount, planId, method, transferContent, opts = {}) {
+  const insert = {
+    user_id: userId,
+    subscription_id: subscriptionId,
+    amount,
+    plan: planId,
+    method,
+    transfer_content: transferContent,
+    status: 'pending'
+  }
+  if (opts.sellerStoreId) insert.seller_store_id = opts.sellerStoreId
+  const { data, error } = await supabase.from('payments').insert(insert).select().single()
   if (error) throw error
   return data
 }
@@ -181,12 +226,16 @@ export async function adminGetAllSubscriptions() {
     .select('*, plans(*), profiles!user_id(email)')
     .order('created_at', { ascending: false })
   if (error) throw error
-  // Normalize: flatten profiles.email → user_email
+  // Normalize: flatten profiles.email + expose plan fields
   return (data || []).map(s => ({
     ...s,
-    user_email: s.profiles?.email || s.user_id
+    user_email:         s.profiles?.email    || s.user_id,
+    plan_service:       s.plans?.service     || 'netflix',
+    plan_fulfillment:   s.plans?.fulfillment_type || 'netflix',
+    plan_account_type:  s.plans?.account_type || 'shared',
   }))
 }
+
 
 export async function adminGetAllPayments() {
   const { data, error } = await supabase
@@ -248,6 +297,38 @@ export async function adminUpdatePayment(id, updates) {
 
 export async function adminSetLoginLink(subscriptionId, loginLink) {
   return adminUpdateSubscription(subscriptionId, { login_link: loginLink })
+}
+
+/** Xác nhận đơn dịch vụ thủ công (manual service) — admin đã xử lý */
+export async function adminConfirmServiceOrder(subscriptionId, note) {
+  return adminUpdateSubscription(subscriptionId, {
+    status: 'active',
+    start_at: new Date().toISOString(),
+    notes: note || null
+  })
+}
+
+/** Giao sản phẩm từ kho (stock fulfillment) */
+export async function adminDeliverFromStock(subscriptionId, content) {
+  return adminUpdateSubscription(subscriptionId, {
+    status: 'active',
+    login_link: content,
+    start_at: new Date().toISOString()
+  })
+}
+
+/** Lấy tài khoản sẵn có trong kho theo service */
+export async function adminGetAvailableStock(service) {
+  const { data, error } = await supabase
+    .from('resources')
+    .select('*')
+    .eq('service', service)
+    .eq('account_type', 'stock')
+    .eq('status', 'available')
+    .order('created_at', { ascending: true })
+    .limit(1)
+  if (error) throw error
+  return data?.[0] || null
 }
 
 export async function adminGetAllProfiles() {
@@ -377,16 +458,18 @@ export async function claimWarranty(subscriptionId) {
 }
 
 // ==================== ADMIN: ACCOUNT INVENTORY (resources) ====================
-export async function adminGetAllAccounts() {
-  const { data, error } = await supabase
-    .from('resources')
-    .select('*')
-    .order('created_at', { ascending: false })
+export async function adminGetAllAccounts(filter = {}) {
+  let q = supabase.from('resources').select('*')
+  if (filter.service)      q = q.eq('service', filter.service)
+  if (filter.account_type) q = q.eq('account_type', filter.account_type)
+  if (filter.status)       q = q.eq('status', filter.status)
+  q = q.order('created_at', { ascending: false })
+  const { data, error } = await q
   if (error) throw error
   return data
 }
 
-export async function adminAddAccount(type, value, note, maxSlots = 5) {
+export async function adminAddAccount(type, value, note, maxSlots = 5, accountType = 'shared', service = 'netflix') {
   const { data, error } = await supabase
     .from('resources')
     .insert({
@@ -395,7 +478,9 @@ export async function adminAddAccount(type, value, note, maxSlots = 5) {
       status:         'available',
       note:           note || null,
       max_slots:      maxSlots,
-      assigned_count: 0
+      assigned_count: 0,
+      account_type:   accountType || 'shared',
+      service:        service || 'netflix'
     })
     .select()
     .single()
@@ -412,7 +497,9 @@ export async function adminAddAccountsBulk(accounts) {
       status:         'available',
       note:           a.note || null,
       max_slots:      a.max_slots || 5,
-      assigned_count: 0
+      assigned_count: 0,
+      account_type:   a.account_type || 'shared',
+      service:        a.service || 'netflix'
     })))
     .select()
   if (error) throw error
@@ -471,3 +558,53 @@ export async function adminAssignAccountFromPool(resourceId, subscriptionId) {
 
   return res
 }
+
+// ==================== STOREFRONT (web con / custom domain) ====================
+/** Nhận gian hàng theo Host hiện tại (tên miền riêng) — 404 nếu không phải domain gian hàng */
+export async function getStoreByHost() {
+  const r = await fetch('/api/store/by-host')
+  if (r.status === 404) return null
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    return null
+  }
+  if (!r.ok) return null
+  return j
+}
+
+/** Công khai — không cần đăng nhập */
+export async function getPublicStore(slug) {
+  const r = await fetch(`/api/store/${encodeURIComponent(slug)}`)
+  const text = await r.text()
+  let j
+  try { j = text ? JSON.parse(text) : {} } catch { j = { message: text } }
+  if (!r.ok) throw new Error(j.error || j.message || `Lỗi ${r.status}`)
+  return j
+}
+
+
+/** Bảng giá đã gộp (≥ giá gốc) — dùng trên storefront khi có sellerStoreId */
+export async function getPlansForSellerStore(sellerStoreId) {
+  const r = await fetch(`/api/public/plans?sellerStoreId=${encodeURIComponent(sellerStoreId)}`)
+  const text = await r.text()
+  let j
+  try { j = text ? JSON.parse(text) : {} } catch { j = { message: text } }
+  if (!r.ok) throw new Error(j.message || j.error || `Lỗi ${r.status}`)
+  return j.plans || []
+}
+
+/** Giá + cấu hình thanh toán cho trang thanh toán */
+export async function getCheckoutQuote(planId, sellerStoreId) {
+  const q = new URLSearchParams({ planId })
+  if (sellerStoreId) q.set('sellerStoreId', sellerStoreId)
+  const r = await fetch(`/api/checkout/quote?${q}`)
+  const text = await r.text()
+  let j
+  try { j = text ? JSON.parse(text) : {} } catch { j = { message: text } }
+  if (!r.ok) throw new Error(j.message || j.error || `Lỗi ${r.status}`)
+  return j
+}
+

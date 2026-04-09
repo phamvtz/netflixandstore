@@ -1,9 +1,9 @@
 import { getUser } from '../utils/auth.js'
 import { getUserSubscriptions, getUserPayments, getPlans, claimWarranty } from '../utils/api.js'
-import { apiGetLink, apiCheckCookie, apiTvInit, apiTvSubmit } from '../utils/netflix.js'
+import { apiGetLink, apiCheckPlanStatus, apiTvInit, apiTvSubmit } from '../utils/netflix.js'
 import {
   formatVND, formatDate, statusLabel, statusClass,
-  daysLeft, planLabel, parseAccount, maskPassword, shortCookie
+  daysLeft, planLabel, parseAccount, maskPassword
 } from '../utils/format.js'
 
 /** Gói không còn quyền xem thông tin tài khoản (hết hạn / huỷ / quá end_at) */
@@ -45,13 +45,20 @@ export async function renderDashboard(container) {
     <section class="dashboard-section">
       <div class="page-container">
         <h1 class="page-title">Tài khoản của tôi</h1>
-        <p class="page-desc">Quản lý đăng ký và tài khoản Netflix</p>
-        <div class="dash-tabs">
-          <button class="dash-tab active" data-tab="subs">📦 Đăng ký</button>
-          <button class="dash-tab" data-tab="payments">💳 Thanh toán</button>
+        <p class="page-desc">Quản lý đăng ký dịch vụ và lịch sử thanh toán</p>
+        <div class="dash-tabs-wrap">
+          <div class="dash-tabs">
+            <div class="dash-tab-indicator" id="dashTabIndicator"></div>
+            <button class="dash-tab active" data-tab="subs">📦 Đăng ký</button>
+            <button class="dash-tab" data-tab="payments">💳 Thanh toán</button>
+          </div>
         </div>
         <div class="dash-panel" id="panelSubs">
-          <div class="loading"><div class="spinner"></div></div>
+          <div class="sub-list">
+            <div class="skeleton dash-skeleton"></div>
+            <div class="skeleton dash-skeleton"></div>
+            <div class="skeleton dash-skeleton"></div>
+          </div>
         </div>
         <div class="dash-panel" id="panelPayments" style="display:none;">
           <div class="loading"><div class="spinner"></div></div>
@@ -63,20 +70,42 @@ export async function renderDashboard(container) {
   const tabs = container.querySelectorAll('.dash-tab')
   const panelSubs = container.querySelector('#panelSubs')
   const panelPayments = container.querySelector('#panelPayments')
+  const indicator = container.querySelector('#dashTabIndicator')
+
+  const moveIndicator = (activeTab) => {
+    if (!indicator || !activeTab) return
+    const tabsEl = activeTab.closest('.dash-tabs')
+    const tabsRect = tabsEl?.getBoundingClientRect()
+    const activeRect = activeTab.getBoundingClientRect()
+    if (!tabsRect) return
+    indicator.style.left = (activeRect.left - tabsRect.left) + 'px'
+    indicator.style.width = activeRect.width + 'px'
+    indicator.style.top = '3px'
+    indicator.style.height = (activeRect.height) + 'px'
+  }
+
+  // Initial indicator position
+  requestAnimationFrame(() => moveIndicator(container.querySelector('.dash-tab.active')))
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
       tabs.forEach(t => t.classList.remove('active'))
       tab.classList.add('active')
+      moveIndicator(tab)
       panelSubs.style.display = tab.dataset.tab === 'subs' ? 'block' : 'none'
       panelPayments.style.display = tab.dataset.tab === 'payments' ? 'block' : 'none'
     })
   })
 
-  let linkPollerTimer = null
+  let linkPollerTimer    = null
+  let countdownTimer     = null
+  let pendingPollTimer   = null
 
-  // Dừng poller khi rời trang
-  const stopPoller = () => { if (linkPollerTimer) { clearInterval(linkPollerTimer); linkPollerTimer = null } }
+  const stopPoller = () => {
+    if (linkPollerTimer)  { clearInterval(linkPollerTimer);  linkPollerTimer  = null }
+    if (countdownTimer)   { clearInterval(countdownTimer);   countdownTimer   = null }
+    if (pendingPollTimer) { clearInterval(pendingPollTimer); pendingPollTimer = null }
+  }
 
   try {
     const [subs, payments, renewPlans] = await Promise.all([
@@ -87,19 +116,51 @@ export async function renderDashboard(container) {
     renderSubscriptions(panelSubs, subs, renewPlans)
     renderPayments(panelPayments, payments)
 
-    // Auto-poll: sub active chưa có login_link → khi có link thì render lại cả thẻ (hiện Get link / TV / Bảo hành)
+    // ── Countdown timer cho đơn pending ──────────────────────
+    const pendingPaymentSubs = subs.filter(s => s.status === 'pending')
+    if (pendingPaymentSubs.length > 0) {
+      countdownTimer = setInterval(() => {
+        pendingPaymentSubs.forEach(sub => {
+          const el = panelSubs.querySelector(`#cdt-${sub.id}`)
+          if (!el) return
+          const cdEl = panelSubs.querySelector(`#countdown-${sub.id}`)
+          const deadline = cdEl ? parseInt(cdEl.dataset.deadline) : 0
+          const remaining = Math.max(0, deadline - Date.now())
+          const min = Math.floor(remaining / 60000)
+          const sec = Math.floor((remaining % 60000) / 1000)
+          el.textContent = `${min}:${String(sec).padStart(2,'0')}`
+          if (remaining === 0) {
+            el.closest('.acc-pending-countdown')?.classList.add('acc-pending-countdown--urgent')
+          }
+        })
+      }, 1000)
+
+      // Poll mỗi 30s để detect nếu server đã hủy → re-render
+      pendingPollTimer = setInterval(async () => {
+        try {
+          const fresh = await getUserSubscriptions(user.id)
+          const wasCancelled = pendingPaymentSubs.some(s => {
+            const updated = fresh.find(f => f.id === s.id)
+            return updated && updated.status === 'cancelled'
+          })
+          if (wasCancelled) {
+            renderSubscriptions(panelSubs, fresh, renewPlans)
+            clearInterval(pendingPollTimer); pendingPollTimer = null
+            clearInterval(countdownTimer);   countdownTimer   = null
+          }
+        } catch {}
+      }, 30000)
+    }
+
+    // ── Poll link cho active subs ─────────────────────────────
     let pendingIds = new Set(
       subs.filter(s => s.status === 'active' && !s.login_link && !subscriptionAccessExpired(s)).map(s => s.id)
     )
 
     const pollPendingLoginLinks = async () => {
-      if (pendingIds.size === 0) { stopPoller(); return }
+      if (pendingIds.size === 0) { clearInterval(linkPollerTimer); linkPollerTimer = null; return }
       let newSubs
-      try {
-        newSubs = await getUserSubscriptions(user.id)
-      } catch {
-        return
-      }
+      try { newSubs = await getUserSubscriptions(user.id) } catch { return }
       let gained = false
       for (const id of pendingIds) {
         const row = newSubs.find(s => s.id === id)
@@ -111,7 +172,7 @@ export async function renderDashboard(container) {
           newSubs.filter(s => s.status === 'active' && !s.login_link && !subscriptionAccessExpired(s)).map(s => s.id)
         )
       }
-      if (pendingIds.size === 0) stopPoller()
+      if (pendingIds.size === 0) { clearInterval(linkPollerTimer); linkPollerTimer = null }
     }
 
     if (pendingIds.size > 0) {
@@ -124,7 +185,6 @@ export async function renderDashboard(container) {
     panelPayments.innerHTML = `<p class="error-text">Lỗi: ${err.message}</p>`
   }
 
-  // Cleanup khi navigate ra khỏi trang
   return stopPoller
 }
 
@@ -136,8 +196,8 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
       <div class="empty-state">
         <div class="empty-icon">📦</div>
         <h3>Chưa có đăng ký nào</h3>
-        <p>Mua gói Netflix để bắt đầu xem phim</p>
-        <a href="#/plans" class="btn btn-primary">Xem bảng giá</a>
+        <p>Mua gói dịch vụ để bắt đầu sử dụng</p>
+        <a href="#/products" class="btn btn-primary">Xem dịch vụ</a>
       </div>`
     return
   }
@@ -147,19 +207,44 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
   subs.forEach(sub => {
     const days = daysLeft(sub.end_at)
     const plan = sub.plans || {}
-    const isActive = sub.status === 'active'
-    const expired = subscriptionAccessExpired(sub)
-    const hasAccount = isActive && sub.login_link && !expired
+    const service = plan.service || 'netflix'
+    const fulfillment = plan.fulfillment_type || (service === 'netflix' ? 'netflix' : 'manual')
+    const isNetflix = service === 'netflix'
+    const isManual  = fulfillment === 'manual'
+    const isStock   = fulfillment === 'stock'
+    const isActive  = sub.status === 'active'
+    const expired   = subscriptionAccessExpired(sub)
+
+    // Netflix: cần parse account từ login_link
+    const hasAccount = isNetflix && isActive && sub.login_link && !expired
     const acc = hasAccount ? parseAccount(sub.login_link) : null
     const cookie = acc ? (acc.cookie || '') : ''
 
+    // Non-Netflix: nội dung giao trong login_link
+    const deliveredContent = !isNetflix && sub.login_link ? sub.login_link : null
+
+    const cardClass = (isActive && !expired)
+      ? 'sub-card sub-card--active'
+      : (sub.status === 'expired' || expired) ? 'sub-card sub-card--expired'
+      : sub.status === 'pending' ? 'sub-card sub-card--pending'
+      : 'sub-card'
+
+    // Service label
+    const svcName = plan.name || planLabel(sub.plan)
+
+    const orderCode = sub.id ? '#' + sub.id.replace(/-/g,'').substring(0,8).toUpperCase() : ''
+
     html += `
-    <div class="sub-card" data-sub-id="${sub.id}" data-plan="${sub.plan || ''}">
+    <div class="${cardClass}" data-sub-id="${sub.id}" data-plan="${sub.plan || ''}">
       <div class="sub-header">
-        <span class="sub-plan">${plan.name || planLabel(sub.plan)}</span>
+        <div>
+          <span class="sub-plan">${svcName}</span>
+          ${orderCode ? `<span class="sub-order-code">${orderCode}</span>` : ''}
+        </div>
         <span class="status-badge ${statusClass(sub.status)}">${statusLabel(sub.status)}</span>
       </div>
       <div class="sub-details">
+        <div class="sub-detail"><span class="label">Dịch vụ:</span><span style="text-transform:capitalize;">${service}</span></div>
         <div class="sub-detail"><span class="label">Giá:</span><span>${formatVND(plan.price || 0)}</span></div>
         ${sub.start_at ? `<div class="sub-detail"><span class="label">Bắt đầu:</span><span>${formatDate(sub.start_at)}</span></div>` : ''}
         ${sub.end_at ? `
@@ -170,6 +255,43 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
         <div class="sub-detail"><span class="label">Tạo lúc:</span><span>${formatDate(sub.created_at)}</span></div>
       </div>
 
+      ${/* ── Non-Netflix: Manual service ── */ ''}
+      ${!isNetflix && isManual ? `
+      <div class="account-section">
+        ${sub.status === 'pending' ? `
+          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:14px 16px;">
+            <p style="font-weight:700;color:#92400e;margin:0 0 6px;">⏳ Đang chờ admin xử lý</p>
+            <p style="font-size:13px;color:#78350f;margin:0;">Admin sẽ xử lý đơn của bạn trong thời gian sớm nhất.</p>
+          </div>
+        ` : sub.status === 'active' ? `
+          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:14px 16px;">
+            <p style="font-weight:700;color:#15803d;margin:0 0 6px;">✅ Đã xử lý</p>
+            ${sub.notes ? `<p style="font-size:13px;color:#166534;margin:0;">${sub.notes}</p>` : ''}
+          </div>
+        ` : ''}
+      </div>` : ''}
+
+      ${/* ── Non-Netflix: Stock product ── */ ''}
+      ${!isNetflix && isStock ? `
+      <div class="account-section">
+        ${deliveredContent ? `
+          <h4>📦 Nội dung sản phẩm</h4>
+          <div class="account-info-box">
+            <div class="acc-info-row">
+              <span class="acc-info-label">📋 Nội dung</span>
+              <span class="acc-info-val" style="word-break:break-all;font-family:var(--mono);font-size:12px;">${deliveredContent}</span>
+              <button class="btn-copy" data-copy="${deliveredContent}" title="Copy">📋</button>
+            </div>
+          </div>
+        ` : sub.status === 'pending' ? `
+          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:14px 16px;">
+            <p style="font-weight:700;color:#92400e;margin:0 0 6px;">⏳ Đang chuẩn bị sản phẩm</p>
+            <p style="font-size:13px;color:#78350f;margin:0;">Sản phẩm sẽ được giao tự động hoặc bởi admin.</p>
+          </div>
+        ` : ''}
+      </div>` : ''}
+
+      ${/* ── Netflix only ── */ ''}
       ${hasAccount && acc ? `
       <!-- ===== ACCOUNT INFO ===== -->
       <div class="account-section">
@@ -193,12 +315,11 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
             <button class="btn-toggle-pass acc-icon-btn" data-sub="${sub.id}" data-pass="${encodeURIComponent(acc.password)}" title="Hiện/Ẩn">👁️</button>
             <button class="btn-copy" data-copy="${acc.password}" title="Copy">📋</button>
           </div>` : ''}
-          ${acc.cookie ? `
-          <div class="acc-info-row">
-            <span class="acc-info-label">🍪 Cookie</span>
-            <span class="acc-info-val acc-cookie-val" title="${acc.cookie}">${shortCookie(acc.cookie)}</span>
-            <button class="btn-copy" data-copy="${acc.cookie}" title="Copy cookie đầy đủ">📋</button>
-          </div>` : ''}
+        </div>
+
+        <!-- Trạng thái gói (sẽ được cập nhật bởi auto-check) -->
+        <div class="acc-plan-status" id="plan-status-${sub.id}">
+          <span class="acc-plan-checking">⏳ Đang kiểm tra gói...</span>
         </div>
 
         <!-- ACTION BUTTONS -->
@@ -225,14 +346,18 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
 
         <!-- TV FORM (hidden until button clicked) -->
         <div class="tv-login-box" id="tv-box-${sub.id}" style="display:none;">
-          <p class="tv-instruction">Nhập mã số hiển thị trên TV Netflix của bạn:</p>
-          <div class="tv-input-row">
-            <input type="text" class="tv-code-input" id="tv-code-${sub.id}"
-              placeholder="VD: 32148294" maxlength="10" inputmode="numeric">
-            <button class="btn btn-sm btn-primary acc-tv-submit-btn" data-sub="${sub.id}">📺 Gửi mã</button>
-            <button class="btn btn-sm btn-outline acc-tv-cancel-btn" data-sub="${sub.id}">Huỷ</button>
+          <div class="acc-result-box tv-login-status" id="result-tv-${sub.id}" style="display:none;" aria-live="polite"></div>
+          <div class="tv-login-body">
+            <p class="tv-instruction">Nhập mã số hiển thị trên TV Netflix (6–10 chữ số).</p>
+            <div class="tv-input-row">
+              <input type="text" class="tv-code-input" id="tv-code-${sub.id}"
+                placeholder="32148294" maxlength="10" inputmode="numeric" autocomplete="one-time-code">
+              <div class="tv-actions">
+                <button type="button" class="btn btn-primary acc-tv-submit-btn" data-sub="${sub.id}">Gửi mã</button>
+                <button type="button" class="btn btn-outline acc-tv-cancel-btn" data-sub="${sub.id}">Huỷ</button>
+              </div>
+            </div>
           </div>
-          <div class="acc-result-box" id="result-tv-${sub.id}" style="display:none;margin-top:8px;"></div>
         </div>
 
         <!-- WARRANTY RESULT -->
@@ -252,15 +377,35 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
       ${isActive && !sub.login_link && !expired ? `
       <div class="acc-pending-notice" id="pending-notice-${sub.id}">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-          <span>⏳ Tài khoản đang được chuẩn bị — hệ thống sẽ tự gán trong ít phút...</span>
-          <button onclick="window.location.reload()" class="btn btn-sm btn-warning" style="flex-shrink:0;">🔄 Tải lại</button>
+          <span style="display:flex;align-items:center;gap:8px;"><span class="link-pulse"></span> Tài khoản đang được chuẩn bị — hệ thống sẽ tự gán trong ít phút...</span>
         </div>
         <div style="font-size:12px;margin-top:6px;color:var(--warning);opacity:.75;">Tự động kiểm tra mỗi 20 giây</div>
       </div>
       ` : ''}
-      ${sub.status === 'pending' ? `
-      <div class="acc-pending-notice">⏳ Đang chờ xác nhận thanh toán từ ngân hàng...</div>
-      ` : ''}
+      ${sub.status === 'pending' ? (() => {
+        const CANCEL_AFTER_MS = 30 * 60 * 1000 // 30 phút
+        const createdMs = sub.created_at ? new Date(sub.created_at).getTime() : Date.now()
+        const remainingMs = Math.max(0, createdMs + CANCEL_AFTER_MS - Date.now())
+        const remainingMin = Math.floor(remainingMs / 60000)
+        const remainingSec = Math.floor((remainingMs % 60000) / 1000)
+        const isExpiring = remainingMin < 5
+        return `
+        <div class="acc-pending-notice" id="pending-notice-${sub.id}">
+          <div class="acc-pending-main">
+            ⏳ Đang chờ xác nhận thanh toán từ ngân hàng...
+          </div>
+          ${remainingMs > 0 ? `
+          <div class="acc-pending-countdown ${isExpiring ? 'acc-pending-countdown--urgent' : ''}" id="countdown-${sub.id}"
+               data-deadline="${createdMs + CANCEL_AFTER_MS}">
+            ${isExpiring ? '⚠️' : '🕐'} Tự hủy sau: <strong id="cdt-${sub.id}">${remainingMin}:${String(remainingSec).padStart(2,'0')}</strong>
+          </div>
+          ` : `
+          <div class="acc-pending-countdown acc-pending-countdown--urgent">
+            ⚠️ Đơn này sẽ bị hủy ngay — vui lòng liên hệ admin nếu đã chuyển tiền.
+          </div>
+          `}
+        </div>`
+      })() : ''}
     </div>`
   })
 
@@ -341,47 +486,67 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
   })
 
   // ===== TV LOGIN — show form =====
+  function clearTvSession(subId) {
+    const submitBtn = panel.querySelector(`.acc-tv-submit-btn[data-sub="${subId}"]`)
+    if (!submitBtn) return
+    delete submitBtn.dataset.authUrl
+    delete submitBtn.dataset.cookie
+  }
+
   panel.querySelectorAll('.acc-tv-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const subId = btn.dataset.sub
-      const cookie = decodeURIComponent(btn.dataset.cookie)
+      let cookie
+      try {
+        cookie = decodeURIComponent(btn.dataset.cookie || '')
+      } catch {
+        cookie = ''
+      }
       const tvBox = panel.querySelector(`#tv-box-${subId}`)
       const resultEl = panel.querySelector(`#result-tv-${subId}`)
+      if (!tvBox || !resultEl) return
 
       if (!cookie) {
+        tvBox.style.display = 'block'
+        clearTvSession(subId)
         showResult(resultEl, 'error', '❌ Tài khoản này chỉ có email/mật khẩu, không có cookie Netflix. Không thể đăng nhập TV.')
-        resultEl.style.display = 'block'
         return
       }
 
       if (tvBox.style.display !== 'none') {
         tvBox.style.display = 'none'
+        clearTvSession(subId)
         return
       }
 
-      // Pre-fetch authUrl in background
+      tvBox.style.display = 'block'
+      clearTvSession(subId)
       btn.disabled = true
       btn.textContent = '⏳'
       showResult(resultEl, 'loading', '⏳ Đang kết nối Netflix...')
-      resultEl.style.display = 'block'
 
       try {
         const init = await apiTvInit(cookie)
         if (!init.success) {
-          showResult(resultEl, 'error', `❌ ${init.message}`)
+          showResult(resultEl, 'error', `❌ ${init.message || 'Không khởi tạo được phiên TV'}`)
           return
         }
-        // Store authUrl on the submit button
+        const authUrl = init.authUrl
+        if (!authUrl || typeof authUrl !== 'string') {
+          showResult(resultEl, 'error', '❌ Server không trả về authURL hợp lệ.')
+          return
+        }
         const submitBtn = panel.querySelector(`.acc-tv-submit-btn[data-sub="${subId}"]`)
-        submitBtn.dataset.authUrl = init.authUrl
-        submitBtn.dataset.cookie = encodeURIComponent(cookie)
-        showResult(resultEl, 'info', '✅ Kết nối thành công! Nhập mã TV bên dưới:')
-        tvBox.style.display = 'block'
+        if (submitBtn) {
+          submitBtn.dataset.authUrl = authUrl
+          submitBtn.dataset.cookie = encodeURIComponent(cookie)
+        }
+        showResult(resultEl, 'success', '✅ Đã kết nối Netflix. Nhập mã trên TV vào ô bên dưới rồi bấm Gửi mã.')
       } catch (err) {
         showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
       } finally {
         btn.disabled = false
-        btn.textContent = '📺 Login TV'
+        btn.textContent = '📺 Nhập mã TV'
       }
     })
   })
@@ -390,10 +555,13 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
   panel.querySelectorAll('.acc-tv-cancel-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const subId = btn.dataset.sub
-      panel.querySelector(`#tv-box-${subId}`).style.display = 'none'
-      panel.querySelector(`#tv-code-${subId}`).value = ''
+      clearTvSession(subId)
+      const tvBoxEl = panel.querySelector(`#tv-box-${subId}`)
+      if (tvBoxEl) tvBoxEl.style.display = 'none'
+      const codeIn = panel.querySelector(`#tv-code-${subId}`)
+      if (codeIn) codeIn.value = ''
       const resultEl = panel.querySelector(`#result-tv-${subId}`)
-      resultEl.style.display = 'none'
+      if (resultEl) resultEl.style.display = 'none'
     })
   })
 
@@ -402,17 +570,27 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
     btn.addEventListener('click', async () => {
       const subId = btn.dataset.sub
       const authUrl = btn.dataset.authUrl
-      const cookie = decodeURIComponent(btn.dataset.cookie || '')
+      let cookie
+      try {
+        cookie = decodeURIComponent(btn.dataset.cookie || '')
+      } catch {
+        cookie = ''
+      }
       const codeInput = panel.querySelector(`#tv-code-${subId}`)
-      const code = (codeInput?.value || '').trim()
       const resultEl = panel.querySelector(`#result-tv-${subId}`)
+      if (!resultEl) return
 
+      const code = ((codeInput?.value || '').replace(/\D/g, ''))
       if (!code.match(/^\d{6,10}$/)) {
-        showResult(resultEl, 'error', '❌ Mã TV phải là 6-10 chữ số')
+        showResult(resultEl, 'error', '❌ Mã TV phải là 6–10 chữ số (có thể dán cả khoảng trắng).')
         return
       }
       if (!authUrl) {
-        showResult(resultEl, 'error', '❌ Chưa có authUrl. Nhấn "Login TV" lại.')
+        showResult(resultEl, 'error', '❌ Phiên TV chưa sẵn sàng. Đóng khung và bấm "Nhập mã TV" lại.')
+        return
+      }
+      if (!cookie) {
+        showResult(resultEl, 'error', '❌ Thiếu cookie phiên. Bấm "Nhập mã TV" để kết nối lại.')
         return
       }
 
@@ -423,13 +601,14 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
         const res = await apiTvSubmit(cookie, authUrl, code)
         if (res.success) {
           showResult(resultEl, 'success', `🎉 ${res.message || 'TV đã được đăng nhập!'}`)
-          codeInput.value = ''
-          // Close TV box after 3s
+          if (codeInput) codeInput.value = ''
           setTimeout(() => {
-            panel.querySelector(`#tv-box-${subId}`).style.display = 'none'
+            clearTvSession(subId)
+            const box = panel.querySelector(`#tv-box-${subId}`)
+            if (box) box.style.display = 'none'
           }, 3000)
         } else {
-          showResult(resultEl, 'error', `❌ ${res.message}`)
+          showResult(resultEl, 'error', `❌ ${res.message || 'Netflix từ chối mã'}`)
         }
       } catch (err) {
         showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
@@ -439,64 +618,114 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
     })
   })
 
-  // ===== WARRANTY =====
+  // ===== AUTO CHECK PLAN STATUS (chạy nền khi có cookie) =====
   panel.querySelectorAll('.acc-warranty-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const subId = btn.dataset.sub
-      const cookie = decodeURIComponent(btn.dataset.cookie)
-      const resultEl = panel.querySelector(`#result-warranty-${subId}`)
-      showResult(resultEl, 'loading', '⏳ Đang kiểm tra tình trạng cookie...')
-      btn.disabled = true
+    const subId  = btn.dataset.sub
+    const cookie = decodeURIComponent(btn.dataset.cookie)
+    const planStatusEl = panel.querySelector(`#plan-status-${subId}`)
+    if (!cookie || !planStatusEl) { if (planStatusEl) planStatusEl.innerHTML = ''; return }
 
+    // Kiểm tra nền sau 1s để không block render
+    setTimeout(async () => {
       try {
-        // Step 1: Check cookie alive (only if cookie exists)
-        if (cookie) {
-          const check = await apiCheckCookie(cookie)
-          if (check.alive) {
-            showResult(resultEl, 'success', '✅ Cookie vẫn còn sống! Tài khoản hoạt động bình thường.')
-            btn.disabled = false
+        const check = await apiCheckPlanStatus(cookie)
+        if (!check.alive) {
+          planStatusEl.innerHTML = `
+            <div class="acc-plan-alert acc-plan-alert--dead">
+              ❌ Cookie đã die — tài khoản không truy cập được
+              <button class="btn btn-xs btn-danger acc-warranty-btn-inline" data-sub="${subId}" data-cookie="${encodeURIComponent(cookie)}" style="margin-left:8px;">Bảo hành ngay</button>
+            </div>`
+        } else if (!check.hasPremium) {
+          planStatusEl.innerHTML = `
+            <div class="acc-plan-alert acc-plan-alert--noPlan">
+              ⚠️ Cookie sống nhưng <strong>mất gói Premium</strong> (hiện: ${check.plan || 'không có gói'})
+              <button class="btn btn-xs btn-warning acc-warranty-btn-inline" data-sub="${subId}" data-cookie="${encodeURIComponent(cookie)}" style="margin-left:8px;">Bảo hành ngay</button>
+            </div>`
+        } else {
+          planStatusEl.innerHTML = `
+            <div class="acc-plan-alert acc-plan-alert--ok">
+              ✅ Gói: <strong>${check.plan || 'Premium'}</strong>
+              ${check.screens ? ` · ${check.screens} màn hình` : ''}
+            </div>`
+        }
+
+        // Bind inline warranty buttons
+        planStatusEl.querySelectorAll('.acc-warranty-btn-inline').forEach(b => {
+          b.addEventListener('click', () => triggerWarranty(b.dataset.sub, decodeURIComponent(b.dataset.cookie), panel, renewPlans))
+        })
+      } catch {
+        planStatusEl.innerHTML = '' // Lỗi mạng → ẩn đi
+      }
+    }, 1200)
+  })
+
+  // ===== WARRANTY TRIGGER =====
+  async function triggerWarranty(subId, cookie, panel, renewPlans) {
+    const resultEl = panel.querySelector(`#result-warranty-${subId}`)
+    const btn      = panel.querySelector(`.acc-warranty-btn[data-sub="${subId}"]`)
+    if (btn) btn.disabled = true
+
+    try {
+      // Kiểm tra chi tiết trước
+      let reason = 'unknown'
+
+      if (cookie) {
+        showResult(resultEl, 'loading', '⏳ Đang kiểm tra tình trạng tài khoản...')
+        try {
+          const check = await apiCheckPlanStatus(cookie)
+          if (check.alive && check.hasPremium) {
+            showResult(resultEl, 'success', `✅ Tài khoản OK — gói ${check.plan || 'Premium'} đang hoạt động bình thường.`)
+            if (btn) btn.disabled = false
             return
           }
-          // Cookie dead → fall through to warranty
-          showResult(resultEl, 'loading', '⏳ Cookie đã die. Đang xử lý bảo hành...')
-        } else {
-          // No cookie (email:password account) → go straight to warranty
-          showResult(resultEl, 'loading', '⏳ Đang xử lý bảo hành...')
+          reason = check.reason || (!check.alive ? 'cookie_dead' : 'plan_lost')
+        } catch {
+          // Nếu check lỗi → tiến hành bảo hành luôn
         }
 
-        // Step 2: Claim warranty
-        const warranty = await claimWarranty(subId)
-
-        if (warranty && warranty.success) {
-          const u = getUser()
-          if (u) {
-            const fresh = await getUserSubscriptions(u.id)
-            renderSubscriptions(panel, fresh, renewPlans)
-          } else {
-            showResult(resultEl, 'success', '✅ Đã đổi tài khoản. Vui lòng tải lại trang.')
-          }
-        } else {
-          showResult(resultEl, 'error', `❌ ${warranty?.message || 'Không thể bảo hành. Liên hệ admin.'}`)
-        }
-      } catch (err) {
-        showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
-      } finally {
-        btn.disabled = false
+        const reasonMsg = reason === 'plan_lost'
+          ? '⏳ Phát hiện mất gói Premium. Đang đổi tài khoản mới...'
+          : '⏳ Cookie đã die. Đang xử lý bảo hành...'
+        showResult(resultEl, 'loading', reasonMsg)
+      } else {
+        showResult(resultEl, 'loading', '⏳ Đang xử lý bảo hành...')
       }
+
+      // Claim warranty từ Supabase RPC
+      const warranty = await claimWarranty(subId)
+
+      if (warranty && warranty.success) {
+        const u = getUser()
+        if (u) {
+          const fresh = await getUserSubscriptions(u.id)
+          renderSubscriptions(panel, fresh, renewPlans)
+        } else {
+          showResult(resultEl, 'success', '✅ Đã đổi tài khoản. Vui lòng tải lại trang.')
+        }
+      } else {
+        showResult(resultEl, 'error', `❌ ${warranty?.message || 'Không thể bảo hành. Vui lòng liên hệ admin.'}`)
+      }
+    } catch (err) {
+      showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
+    } finally {
+      if (btn) btn.disabled = false
+    }
+  }
+
+  // Nút bảo hành thủ công (cũ)
+  panel.querySelectorAll('.acc-warranty-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      triggerWarranty(btn.dataset.sub, decodeURIComponent(btn.dataset.cookie), panel, renewPlans)
     })
   })
 }
 
 // Helper: show result with state
 function showResult(el, state, message) {
-  const colors = {
-    loading: 'var(--warning)',
-    success: 'var(--secondary)',
-    error:   'var(--danger)',
-    info:    'var(--primary)'
-  }
+  if (!el) return
+  const safe = state === 'loading' || state === 'success' || state === 'error' || state === 'info' ? state : 'info'
   el.style.display = 'block'
-  el.innerHTML = `<span style="color:${colors[state] || 'var(--text-secondary)'}">${message}</span>`
+  el.innerHTML = `<span class="acc-result-msg acc-result-msg--${safe}">${message}</span>`
 }
 
 function renderPayments(panel, payments) {

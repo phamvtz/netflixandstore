@@ -31,6 +31,15 @@ export async function apiCheckCookie(cookie) {
   return apiFetch('/api/check-cookie', { cookie })
 }
 
+/**
+ * POST cookie → kiểm tra alive + có gói Premium không
+ * @returns {{ alive, hasPremium, plan, email, screens, needsWarranty, reason }}
+ * reason: 'cookie_dead' | 'plan_lost' | null
+ */
+export async function apiCheckPlanStatus(cookie) {
+  return apiFetch('/api/check-plan-status', { cookie })
+}
+
 // POST cookie → GET netflix.com/tv8 → return authUrl
 export async function apiTvInit(cookie) {
   return apiFetch('/api/tv-init', { cookie })

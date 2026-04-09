@@ -1,7 +1,8 @@
 import './style.css'
 import { initAuth } from './utils/auth.js'
 import { registerRoute, initRouter } from './router.js'
-import { getSettings } from './utils/api.js'
+import { getSettings, getStoreByHost } from './utils/api.js'
+import { setCheckoutStore } from './utils/storeContext.js'
 import { renderNavbar } from './components/Navbar.js'
 import { renderFooter } from './components/Footer.js'
 import { renderHome } from './pages/Home.js'
@@ -11,6 +12,12 @@ import { renderDashboard } from './pages/Dashboard.js'
 import { renderPayment } from './pages/Payment.js'
 import { renderAdmin } from './pages/Admin.js'
 import { renderTools } from './pages/Tools.js'
+
+import { renderStorefront } from './pages/Storefront.js'
+import { renderApiDocs } from './pages/ApiDocs.js'
+import { renderProducts } from './pages/Products.js'
+import { renderGuides } from './pages/Guides.js'
+import { renderMovieSuggestions } from './pages/MovieSuggestions.js'
 
 // ── Global Toast ─────────────────────────────────────────────
 const toastEl = document.createElement('div')
@@ -28,7 +35,7 @@ toastStyles.textContent = `
     display: flex; align-items: center; gap: 10px;
     background: #1F2937; color: #F9FAFB;
     padding: 12px 18px; border-radius: 10px;
-    font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 500;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 14px; font-weight: 500;
     box-shadow: 0 8px 24px rgba(0,0,0,.2);
     pointer-events: auto;
     transform: translateX(110%);
@@ -82,21 +89,72 @@ function setMeta(name, content, attr = 'name') {
   el.setAttribute('content', content)
 }
 
+// ── Xử lý Supabase auth callback (email confirmation, password reset) ────────
+function handleSupabaseAuthCallback() {
+  const hash = window.location.hash
+  if (!hash || !hash.includes('access_token=')) return null
+
+  const params = new URLSearchParams(hash.slice(1))
+  const type = params.get('type') // 'signup' | 'recovery' | 'email_change'
+
+  // Xoá token khỏi URL ngay — Supabase đã đọc rồi
+  window.history.replaceState(null, '', window.location.pathname)
+
+  return type
+}
+
+// ── Tên miền riêng: Host trùng seller_stores.custom_domain → vào thẳng gian hàng ──
+async function resolveCustomDomainBeforeRouter() {
+  try {
+    const bundle = await getStoreByHost()
+    const store = bundle?.store
+    if (!store?.slug) return
+    window.__storeFromCustomDomain = store
+    window.__storeBundle = bundle
+    setCheckoutStore({ id: store.id, slug: store.slug })
+    const path = window.location.hash.replace(/^#/, '') || '/'
+    if (path === '/' || path === '') {
+      window.location.hash = '#/s/' + encodeURIComponent(store.slug)
+    }
+  } catch (_) {}
+}
+
 // ── Init ─────────────────────────────────────────────────────
 async function init() {
+  // Detect Supabase auth callback TRƯỚC khi init (trước khi router chạy)
+  const authCallbackType = handleSupabaseAuthCallback()
+
   await Promise.all([initAuth(), applySEO()])
+  await resolveCustomDomainBeforeRouter()
 
   registerRoute('/', renderHome)
   registerRoute('/plans', renderPlans)
+  registerRoute('/products', renderProducts)
+  registerRoute('/movies', renderMovieSuggestions)
   registerRoute('/login', renderLogin)
   registerRoute('/dashboard', renderDashboard)
   registerRoute('/payment/:id', renderPayment)
   registerRoute('/admin', renderAdmin)
   registerRoute('/tools', renderTools)
+  registerRoute('/guides', renderGuides)
+  registerRoute('/guides/:slug', renderGuides)
+  registerRoute('/s/:slug', renderStorefront)
+  registerRoute('/api-docs', renderApiDocs)
 
-  // Xóa initAuth() thừa vì đã chạy trong Promise.all ở trên
   renderNavbar()
   renderFooter()
+
+  // Xử lý sau khi router đã đăng ký routes
+  if (authCallbackType === 'signup') {
+    // Email confirmation thành công → vào dashboard + toast
+    window.location.hash = '#/dashboard'
+    setTimeout(() => showToast('✅ Email đã xác nhận! Chào mừng bạn đến với Netflix Store.', 'success', 5000), 300)
+  } else if (authCallbackType === 'recovery') {
+    // Password reset — về login
+    window.location.hash = '#/login'
+    setTimeout(() => showToast('🔑 Bạn có thể đặt lại mật khẩu ngay bây giờ.', 'info', 4000), 300)
+  }
+  // Luôn khởi động router (hash đã được set ở trên nếu cần)
   initRouter()
 }
 

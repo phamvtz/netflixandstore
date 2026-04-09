@@ -1,7 +1,11 @@
-import { getPlan, createSubscription, createPayment, getSettings } from '../utils/api.js'
+import {
+  getPlan, createSubscription, createPayment, getSettings, getCheckoutQuote
+} from '../utils/api.js'
 import { getUser } from '../utils/auth.js'
 import { formatVND, generateTransferContent, planLabel } from '../utils/format.js'
 import { navigate } from '../router.js'
+import { getCheckoutStore, clearCheckoutStore } from '../utils/storeContext.js'
+import { isPlanHiddenFromStorefront } from '../utils/catalog.js'
 
 export async function renderPayment(container, params) {
   const user = getUser()
@@ -10,11 +14,30 @@ export async function renderPayment(container, params) {
   const planId = params.id
   if (!planId) { navigate('/plans'); return }
 
-  let plan, cfg
+  const checkoutStore = getCheckoutStore()
+  const sellerStoreId = checkoutStore?.id ?? null
+  const payOpts = sellerStoreId ? { sellerStoreId } : {}
+
+  let plan
+  let paymentCfg
   try {
-    ;[plan, cfg] = await Promise.all([getPlan(planId), getSettings()])
+    const quote = await getCheckoutQuote(planId, sellerStoreId)
+    plan = quote.plan
+    paymentCfg = quote.payment
   } catch {
-    try { plan = await getPlan(planId); cfg = {} } catch {
+    try {
+      const cfg = await getSettings()
+      plan = await getPlan(planId)
+      paymentCfg = {
+        source: 'site',
+        bank_name: cfg.bank_name || 'MB Bank',
+        bank_account: cfg.bank_account || '321336',
+        bank_owner: cfg.bank_owner || 'PHAM VAN VIET',
+        momo_number: cfg.momo_number || '0336636315',
+        momo_name: cfg.momo_name || 'PHAM VAN VIET',
+        vietqr_bank_bin: '970422'
+      }
+    } catch {
       container.innerHTML = `
         <div class="page-container" style="text-align:center;padding:100px 20px;">
           <h1>Gói không tồn tại</h1>
@@ -24,21 +47,36 @@ export async function renderPayment(container, params) {
       return
     }
   }
-  if (!plan) { container.innerHTML = `<div class="page-container" style="text-align:center;padding:100px 20px;"><h1>Gói không tồn tại</h1><a href="#/plans" class="btn btn-primary">Xem bảng giá</a></div>`; return }
+  if (!plan) {
+    container.innerHTML = `<div class="page-container" style="text-align:center;padding:100px 20px;"><h1>Gói không tồn tại</h1><a href="#/plans" class="btn btn-primary">Xem bảng giá</a></div>`
+    return
+  }
 
-  // Thông tin ngân hàng từ settings (fallback về hardcode nếu chưa cấu hình)
-  const bankName    = cfg.bank_name    || 'MB Bank'
-  const bankAccount = cfg.bank_account || '321336'
-  const bankOwner   = cfg.bank_owner   || 'PHAM VAN VIET'
-  const momoNumber  = cfg.momo_number  || '0336636315'
-  const momoName    = cfg.momo_name    || 'PHAM VAN VIET'
+  let paySettings = {}
+  try { paySettings = await getSettings() } catch (_) {}
+  if (isPlanHiddenFromStorefront(plan, paySettings)) {
+    container.innerHTML = `
+      <div class="page-container" style="text-align:center;padding:100px 20px;">
+        <h1>Gói không còn mở bán</h1>
+        <p style="color:var(--text-secondary);margin:12px 0;">Gói đã được ẩn hoặc ngừng hiển thị trên cửa hàng.</p>
+        <a href="#/plans" class="btn btn-primary">Xem bảng giá</a>
+      </div>`
+    return
+  }
+
+  const bankName    = paymentCfg.bank_name    || 'MB Bank'
+  const bankAccount = paymentCfg.bank_account || ''
+  const bankOwner   = paymentCfg.bank_owner   || ''
+  const momoNumber  = paymentCfg.momo_number  || ''
+  const momoName    = paymentCfg.momo_name    || ''
+  const vietqrBin   = paymentCfg.vietqr_bank_bin || '970422'
 
   // ── Session key: persist transferContent across iOS page reloads ────────────
   // iOS Safari can fully reload the page when the user returns from the banking
   // app.  Without sessionStorage the page would generate a new transferContent,
   // show a new QR, and the webhook that already fired for the OLD code would
   // never match a DB record → payment confirmed in bank but "pending" forever.
-  const SESSION_KEY = `nf_pay_${user.id}_${planId}`
+  const SESSION_KEY = `nf_pay_${user.id}_${planId}_${sellerStoreId || 'main'}`
 
   // Try to reuse an existing pending session (same transferContent = same QR)
   let savedSession = null
@@ -55,7 +93,7 @@ export async function renderPayment(container, params) {
       if (checkData.confirmed) {
         sessionStorage.removeItem(SESSION_KEY)
         showWaitingUI(container, plan, planId, savedSession.transferContent, SESSION_KEY,
-          { bankName, bankAccount, bankOwner })
+          { bankName, bankAccount, bankOwner, vietqrBin })
         return
       }
       // still pending — keep using the same transferContent / QR
@@ -76,10 +114,18 @@ export async function renderPayment(container, params) {
   // The confirm button becomes a simple "show waiting UI" action.
   if (!savedSession) {
     try {
-      container.innerHTML = `<div style="text-align:center;padding:80px 20px;"><div class="spinner" style="margin:0 auto 16px;"></div><p>Đang khởi tạo...</p></div>`
-      const sub = await createSubscription(user.id, planId)
-      await createPayment(user.id, sub.id, plan.price, planId, 'bank', transferContent)
-      savedSession = { transferContent, subscriptionId: sub.id }
+      container.innerHTML = `
+        <section class="payment-section">
+          <div class="page-container">
+            <div class="payment-grid">
+              <div class="skeleton payment-skeleton"></div>
+              <div class="skeleton payment-skeleton"></div>
+            </div>
+          </div>
+        </section>`
+      const sub = await createSubscription(user.id, planId, payOpts)
+      await createPayment(user.id, sub.id, plan.price, planId, 'bank', transferContent, payOpts)
+      savedSession = { transferContent, subscriptionId: sub.id, orderCode: sub.id.replace(/-/g,'').substring(0,8).toUpperCase() }
       sessionStorage.setItem(SESSION_KEY, JSON.stringify(savedSession))
     } catch (err) {
       container.innerHTML = `<div style="text-align:center;padding:80px 20px;"><p style="color:red;">Lỗi khởi tạo: ${err.message}</p><a href="#/plans" class="btn btn-primary" style="margin-top:12px;">Thử lại</a></div>`
@@ -96,6 +142,11 @@ export async function renderPayment(container, params) {
           <!-- ORDER SUMMARY -->
           <div class="payment-card order-summary">
             <h2>📦 Đơn hàng</h2>
+            ${savedSession?.orderCode ? `
+            <div class="order-detail" style="border-bottom:2px solid var(--primary-ring);padding-bottom:10px;margin-bottom:2px;">
+              <span>Mã đơn:</span>
+              <strong style="font-family:var(--mono);font-size:15px;color:var(--primary);letter-spacing:.08em;">#${savedSession.orderCode}</strong>
+            </div>` : ''}
             <div class="order-detail">
               <span>Gói:</span>
               <strong>${plan.name || planLabel(plan.id)}</strong>
@@ -108,7 +159,10 @@ export async function renderPayment(container, params) {
               <span>Tổng tiền:</span>
               <strong class="price-highlight">${formatVND(plan.price)}</strong>
             </div>
-            <div class="order-detail">
+            ${sellerStoreId && checkoutStore?.slug
+              ? `<div class="order-detail" style="font-size:13px;"><span>Gian hàng:</span><strong>#/s/${checkoutStore.slug}</strong>${paymentCfg.source === 'seller' ? ' • Thanh toán về TK đại lý' : ''}</div>`
+              : ''}
+            <div class="order-detail transfer-code-box">
               <span>Nội dung CK:</span>
               <strong class="transfer-code">${transferContent}</strong>
             </div>
@@ -145,10 +199,17 @@ export async function renderPayment(container, params) {
               </div>
             </div>
             <div class="bank-qr">
-              <img src="https://img.vietqr.io/image/970422-${bankAccount}-compact.jpg?amount=${plan.price}&addInfo=${encodeURIComponent(transferContent)}&accountName=${encodeURIComponent(bankOwner)}"
+              <img src="https://img.vietqr.io/image/${vietqrBin}-${bankAccount}-compact.jpg?amount=${plan.price}&addInfo=${encodeURIComponent(transferContent)}&accountName=${encodeURIComponent(bankOwner)}"
                    alt="QR Code" class="qr-img" onerror="this.style.display='none'">
               <p class="qr-note">Quét mã QR để chuyển khoản nhanh</p>
             </div>
+            ${momoNumber
+              ? `<div class="bank-info" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+                   <h3 style="margin:0 0 10px;font-size:16px;">📱 MoMo</h3>
+                   <div class="bank-row"><span>Số:</span><strong>${momoNumber}</strong></div>
+                   <div class="bank-row"><span>Tên:</span><strong>${momoName}</strong></div>
+                 </div>`
+              : ''}
 
             <div class="payment-warning">
               ⚠️ <strong>Quan trọng:</strong> Nhập đúng nội dung chuyển khoản <code>${transferContent}</code> để được xử lý tự động!
@@ -175,7 +236,9 @@ export async function renderPayment(container, params) {
   // Confirm button — DB records already exist, just show the waiting UI
   const btnConfirm = container.querySelector('#btnConfirmPayment')
   btnConfirm.addEventListener('click', () => {
-    showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, { bankName, bankAccount, bankOwner })
+    showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, {
+      bankName, bankAccount, bankOwner, vietqrBin
+    })
   })
 }
 
@@ -195,7 +258,7 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
           <div class="waiting-spinner" id="waitSpinner">
             <div class="spinner" style="margin:0 auto 20px;"></div>
           </div>
-          <div id="waitIcon" style="display:none;font-size:60px;margin-bottom:16px;">🎉</div>
+          <div id="waitIcon" class="success-icon" style="display:none;font-size:64px;margin-bottom:16px;">🎉</div>
 
           <h2 id="waitTitle" style="font-size:22px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">
             ⏳ Đang chờ xác nhận thanh toán...
@@ -254,7 +317,7 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
               <div class="order-detail"><span>Gói:</span><strong>${plan.name || planLabel(planId)}</strong></div>
               <div class="order-detail"><span>Số tiền:</span><strong>${formatVND(plan.price)}</strong></div>
               <div class="order-detail" id="loginLinkRow" style="display:none;">
-                <span>Link đăng nhập:</span>
+                <span>${isNetflixPlan ? 'Link đăng nhập:' : 'Nội dung:'}</span>
                 <a id="loginLinkAnchor" href="#" target="_blank" class="price-highlight" style="word-break:break-all;"></a>
               </div>
             </div>
@@ -354,8 +417,15 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
 
   let linkPollTimer = null
 
+  // Determine plan type (Netflix vs manual service vs stock product)
+  const planService     = plan.service          || 'netflix'
+  const planFulfillment = plan.fulfillment_type || (planService === 'netflix' ? 'netflix' : 'manual')
+  const isNetflixPlan   = planService === 'netflix'
+  const isManualService = planFulfillment === 'manual'
+
   function showSuccess(data) {
     if (SESSION_KEY) { try { sessionStorage.removeItem(SESSION_KEY) } catch (_) {} }
+    clearCheckoutStore()
 
     waitSpinner.style.display   = 'none'
     waitIcon.style.display      = 'block'
@@ -363,28 +433,45 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
     transferRem.style.display   = 'none'
     if (elapsedText_el) elapsedText_el.style.display = 'none'
 
+    // ── Manual service: admin xử lý tay ──
+    if (isManualService) {
+      waitTitle.textContent = '✅ Thanh toán thành công!'
+      waitDesc.innerHTML    = `Đơn <strong>${plan.name}</strong> đã được ghi nhận.<br>
+        Admin sẽ xử lý và liên hệ bạn trong thời gian sớm nhất.<br>
+        <small style="color:var(--text-secondary)">Kiểm tra trạng thái tại mục Tài khoản.</small>`
+      successInfo.style.display = 'block'
+      return
+    }
+
     if (data.loginLink) {
-      // Có link ngay → hiện luôn
-      waitTitle.textContent = '🎉 Thanh toán & kích hoạt thành công!'
-      waitDesc.textContent  = 'Tài khoản Netflix của bạn đã sẵn sàng.'
+      // Có link/nội dung ngay → hiện luôn
+      if (isNetflixPlan) {
+        waitTitle.textContent = '🎉 Thanh toán & kích hoạt thành công!'
+        waitDesc.textContent  = 'Tài khoản Netflix của bạn đã sẵn sàng.'
+      } else {
+        waitTitle.textContent = '🎉 Thanh toán thành công! Sản phẩm đã sẵn sàng.'
+        waitDesc.textContent  = 'Nội dung sản phẩm của bạn bên dưới.'
+      }
       const lr = container.querySelector('#loginLinkRow')
       const la = container.querySelector('#loginLinkAnchor')
       if (lr && la) { lr.style.display = 'flex'; la.href = data.loginLink; la.textContent = data.loginLink }
       successInfo.style.display = 'block'
     } else {
-      // Thanh toán OK nhưng hệ thống chưa gán tài khoản (kho đang bổ sung)
+      // Thanh toán OK nhưng hệ thống chưa gán (kho đang bổ sung)
       waitTitle.textContent = '✅ Thanh toán thành công!'
-      waitDesc.innerHTML    = 'Hệ thống đang chọn tài khoản phù hợp cho bạn...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 15 giây</small>'
+      if (isNetflixPlan) {
+        waitDesc.innerHTML = 'Hệ thống đang chọn tài khoản phù hợp...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 15 giây</small>'
+      } else {
+        waitDesc.innerHTML = 'Hệ thống đang chuẩn bị sản phẩm...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 15 giây</small>'
+      }
       successInfo.style.display = 'block'
 
-      // Poll cho đến khi có loginLink (tối đa 30 phút)
-      const subId   = data.subId || data.subscription_id
       const maxWait = Date.now() + 30 * 60 * 1000
 
       linkPollTimer = setInterval(async () => {
         if (Date.now() > maxWait) {
           clearInterval(linkPollTimer)
-          waitDesc.innerHTML = '⚠️ Chưa có tài khoản khả dụng. Vui lòng liên hệ admin hoặc kiểm tra lại trong mục <a href="#/dashboard">Tài khoản</a>.'
+          waitDesc.innerHTML = '⚠️ Chưa có sản phẩm khả dụng. Vui lòng liên hệ admin hoặc kiểm tra tại <a href="#/dashboard">Tài khoản</a>.'
           return
         }
         try {
@@ -392,8 +479,13 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
           const info = await r.json()
           if (info.loginLink) {
             clearInterval(linkPollTimer)
-            waitTitle.textContent = '🎉 Tài khoản đã sẵn sàng!'
-            waitDesc.textContent  = 'Nhấn vào link dưới đây để đăng nhập Netflix ngay:'
+            if (isNetflixPlan) {
+              waitTitle.textContent = '🎉 Tài khoản Netflix đã sẵn sàng!'
+              waitDesc.textContent  = 'Nhấn vào link dưới đây để đăng nhập:'
+            } else {
+              waitTitle.textContent = '🎉 Sản phẩm đã sẵn sàng!'
+              waitDesc.textContent  = 'Nội dung sản phẩm của bạn:'
+            }
             const lr = container.querySelector('#loginLinkRow')
             const la = container.querySelector('#loginLinkAnchor')
             if (lr && la) { lr.style.display = 'flex'; la.href = info.loginLink; la.textContent = info.loginLink }

@@ -17,15 +17,19 @@ function notifyListeners() {
   listeners.forEach(cb => cb(currentUser, currentProfile))
 }
 
+let lastAuthEvent = null
+export function getLastAuthEvent() { return lastAuthEvent }
+
 export async function initAuth() {
   const { data: { session } } = await supabase.auth.getSession()
   if (session?.user) {
     currentUser = session.user
     await fetchProfile()
-    notifyListeners() // Thông báo ngay sau khi có profile lần đầu
+    notifyListeners()
   }
 
   supabase.auth.onAuthStateChange(async (event, session) => {
+    lastAuthEvent = event
     if (session?.user) {
       currentUser = session.user
       await fetchProfile()
@@ -34,6 +38,8 @@ export async function initAuth() {
       currentProfile = null
     }
     notifyListeners()
+    // Dispatch custom event cho main.js xử lý callback
+    window.dispatchEvent(new CustomEvent('supabaseAuthEvent', { detail: { event, session } }))
   })
 }
 
@@ -60,11 +66,7 @@ export function isAdmin() {
   return currentProfile?.role === 'admin'
 }
 
-export function isEmployee() {
-  return currentProfile?.role === 'employee'
-}
-
-// Admin hoặc Employee đều là staff
+/** Returns true for admin or employee — kept for future staff-only routes */
 export function isStaff() {
   return currentProfile?.role === 'admin' || currentProfile?.role === 'employee'
 }
@@ -101,5 +103,19 @@ export async function signOut() {
   currentUser = null
   currentProfile = null
   notifyListeners()
+}
+
+/** Gửi lại email xác nhận (dùng khi user chưa confirm) */
+export async function resendConfirmation(email) {
+  const { error } = await supabase.auth.resend({ type: 'signup', email })
+  if (error) throw error
+}
+
+/** Gửi email reset mật khẩu */
+export async function resetPassword(email) {
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin + '/#/reset-password'
+  })
+  if (error) throw error
 }
 

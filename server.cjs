@@ -1,6 +1,11 @@
 const path = require('path')
+const fs = require('fs')
 const dns = require('dns')
-try { dns.setDefaultResultOrder('ipv4first') } catch (_) { }
+try {
+  dns.setDefaultResultOrder('ipv4first')
+} catch {
+  /* optional on older Node */
+}
 
 require('dotenv').config({ path: path.join(__dirname, '.env') })
 
@@ -42,6 +47,36 @@ const app = express()
 app.use(express.json())
 app.use(express.static(path.join(__dirname, 'dist')))
 
+/** Cảnh báo nếu chỉ chạy `node server.cjs` mà quên `npm run build` — UI vẫn là bundle cũ (thiếu link API, v.v.). */
+function warnIfDistBundleStale() {
+  try {
+    const assetsDir = path.join(__dirname, 'dist', 'assets')
+    if (!fs.existsSync(assetsDir)) {
+      console.warn(
+        '\n[netflixauto] Chưa có dist/assets. Frontend chưa build. Chạy: npm run build\n'
+      )
+      return
+    }
+    const jsFiles = fs
+      .readdirSync(assetsDir)
+      .filter((f) => f.endsWith('.js') && /^index-/.test(f))
+    const hasApiDocs = jsFiles.some((f) => {
+      const s = fs.readFileSync(path.join(assetsDir, f), 'utf8')
+      return s.includes('api-docs') || s.includes('renderApiDocs')
+    })
+    if (!hasApiDocs) {
+      console.warn(
+        '\n[netflixauto] dist/ có vẻ CŨ (bundle không chứa trang API). Giao diện sẽ thiếu nút/link API.\n' +
+          '    → Chạy: npm run build   rồi khởi động lại server.\n' +
+          '    → Hoặc dùng: npm start   (đã gồm build + node server.cjs)\n'
+      )
+    }
+  } catch {
+    /* ignore */
+  }
+}
+warnIfDistBundleStale()
+
 // ===================== DB =====================
 const dbPool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -72,12 +107,25 @@ async function sendTelegram(message) {
       {
         chat_id: TG_CHAT_ID,
         text: message,
-        parse_mode: 'HTML'
+      parse_mode: 'HTML'
       },
       { timeout: 8000 }
     )
   } catch (err) {
     console.error('[Telegram]', err.message)
+  }
+}
+
+async function sendTelegramWithToken(botToken, chatId, message) {
+  if (!botToken || !chatId) return
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      { chat_id: chatId, text: message, parse_mode: 'HTML' },
+      { timeout: 8000 }
+    )
+  } catch (err) {
+    console.error('[Telegram seller]', err.message)
   }
 }
 
@@ -147,8 +195,62 @@ const ALLOWED_SETTING_KEYS = new Set([
   'resend_api_key', 'email_from',
   'contact_telegram', 'contact_zalo',
   'social_facebook', 'social_youtube', 'social_tiktok',
-  'footer_text'
+  'footer_text',
+  'catalog_config',
+  'guides_config'
 ])
+
+/** Mặc định khi chưa cấu hình guides_config trong DB (chỉ dùng cho GET /api/guides) */
+const GUIDES_PUBLIC_FALLBACK = {
+  introTitle: 'Hướng dẫn sử dụng',
+  introSubtitle:
+    'Các bài hướng dẫn chi tiết giúp bạn sử dụng dịch vụ dễ dàng và hiệu quả nhất.',
+  posts: [
+    {
+      id: 'mua-hang-thanh-toan',
+      slug: 'mua-hang-thanh-toan',
+      title: 'Mua hàng và thanh toán',
+      order: 0,
+      published: true,
+      bodyMd:
+        '## Chọn gói dịch vụ\n\n' +
+        'Vào **Dịch vụ** hoặc **Bảng giá**, chọn gói phù hợp rồi làm theo bước thanh toán.\n\n' +
+        '## Chuyển khoản\n\n' +
+        '- Chuyển đúng **số tài khoản** và **nội dung CK** hiển thị trên trang thanh toán.\n' +
+        '- Sau khi ngân hàng ghi nhận, hệ thống sẽ **tự kích hoạt** đơn trong vài phút.\n\n' +
+        '## Lưu ý\n\n' +
+        'Giữ **mã đơn / nội dung CK** để tra cứu khi cần hỗ trợ.'
+    },
+    {
+      id: 'nhan-tai-khoan-netflix',
+      slug: 'nhan-tai-khoan-netflix',
+      title: 'Nhận tài khoản Netflix sau khi mua',
+      order: 1,
+      published: true,
+      bodyMd:
+        '## Xem trong Tài khoản\n\n' +
+        'Đăng nhập → **Tài khoản** (Dashboard). Khi đơn ở trạng thái **Đang hoạt động**, bạn sẽ thấy **email và mật khẩu** (và các nút tiện ích nếu có).\n\n' +
+        '## Get Login Link / TV\n\n' +
+        '- **Get Login Link**: tạo link đăng nhập nhanh (nếu gói hỗ trợ).\n' +
+        '- **Nhập mã TV**: làm theo hướng dẫn trên màn hình để nhập mã từ TV Netflix.\n\n' +
+        '## Bảo hành\n\n' +
+        'Nếu không đăng nhập được hoặc mất gói, dùng nút **Bảo hành** trong Dashboard (trong thời gian hiệu lực gói).'
+    },
+    {
+      id: 'lien-he-ho-tro',
+      slug: 'lien-he-ho-tro',
+      title: 'Liên hệ hỗ trợ',
+      order: 2,
+      published: true,
+      bodyMd:
+        '## Kênh hỗ trợ\n\n' +
+        'Xem **Telegram / Zalo** (hoặc thông tin liên hệ) ở chân trang website hoặc trang **Cài đặt** cửa hàng.\n\n' +
+        '## Khi gửi tin\n\n' +
+        '- Ghi rõ **email đăng ký** và **mã đơn** (hoặc ảnh chụp thanh toán).\n' +
+        '- Mô tả lỗi: không đăng nhập được, sai mật khẩu, v.v.'
+    }
+  ]
+}
 
 // ===================== HELPERS =====================
 function nodeRequest(url, options = {}) {
@@ -216,34 +318,70 @@ const NETFLIX_HEADERS = {
   'Upgrade-Insecure-Requests': '1',
 }
 
-// ===================== ADMIN AUTH =====================
-async function verifySupabaseAdminAccessToken(accessToken) {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !accessToken) return null
-  try {
-    const r = await axios.get(`${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/user`, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        apikey: SUPABASE_ANON_KEY
-      },
-      timeout: 12000
-    })
-    const userId = r.data?.id
-    if (!userId) return null
+// ===================== AUTH (Supabase JWT + profiles.role) =====================
 
+/** Decode JWT payload mà không cần gọi HTTP — nhanh hơn, không phụ thuộc Supabase API */
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+    // Kiểm tra hết hạn
+    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) {
+      console.warn('[JWT] Token expired')
+      return null
+    }
+    return payload
+  } catch {
+    return null
+  }
+}
+
+/** @returns {{ userId: string, role: string } | null} */
+async function verifySupabaseAccessToken(accessToken) {
+  if (!accessToken) return null
+
+  // Bước 1: Decode JWT cục bộ — không cần HTTP đến Supabase
+  const payload = decodeJwtPayload(accessToken)
+  const userId = payload?.sub
+  if (!userId) {
+    // Fallback: gọi Supabase REST API nếu không decode được
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null
+    try {
+      const r = await axios.get(`${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/user`, {
+        headers: { Authorization: `Bearer ${accessToken}`, apikey: SUPABASE_ANON_KEY },
+        timeout: 8000
+      })
+      const uid = r.data?.id
+      if (!uid) return null
+      const client = await dbPool.connect()
+      try {
+        const pr = await client.query(`SELECT role FROM profiles WHERE id = $1 LIMIT 1`, [uid])
+        return { userId: uid, role: pr.rows[0]?.role || 'user' }
+      } finally { client.release() }
+    } catch (err) {
+      console.warn('[verifyToken fallback] failed:', err.message)
+      return null
+    }
+  }
+
+  // Bước 2: Query profiles table bằng userId từ JWT
+  try {
     const client = await dbPool.connect()
     try {
       const pr = await client.query(
         `SELECT role FROM profiles WHERE id = $1 LIMIT 1`,
         [userId]
       )
-      if (pr.rows[0]?.role === 'admin') return userId
+      const role = pr.rows[0]?.role || 'user'
+      return { userId, role }
     } finally {
       client.release()
     }
   } catch (err) {
-    console.warn('[requireAdmin] JWT verify failed:', err.message)
+    console.warn('[verifyToken] DB query failed:', err.message)
+    return null
   }
-  return null
 }
 
 function requireAdmin(req, res, next) {
@@ -263,18 +401,88 @@ function requireAdmin(req, res, next) {
     })
   }
 
-  verifySupabaseAdminAccessToken(m[1])
-    .then((userId) => {
-      if (!userId) {
+  verifySupabaseAccessToken(m[1])
+    .then((u) => {
+      if (!u || u.role !== 'admin') {
         return res.status(403).json({
           error: 'Forbidden',
           message: 'Chỉ profiles.role = admin mới gọi được API này'
         })
       }
-      req.adminUserId = userId
+      req.adminUserId = u.userId
       next()
     })
     .catch(() => res.status(401).json({ error: 'Unauthorized' }))
+}
+
+/** Seller hoặc admin — dùng cho API quản lý web con */
+function requireSellerOrAdmin(req, res, next) {
+  const auth = req.headers.authorization || ''
+  const m = auth.match(/^Bearer\s+(\S+)/i)
+  if (!m) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Cần Bearer token (đăng nhập)' })
+  }
+  verifySupabaseAccessToken(m[1])
+    .then((u) => {
+      if (!u) return res.status(401).json({ error: 'Unauthorized' })
+      if (u.role !== 'seller' && u.role !== 'admin') {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Chỉ tài khoản seller (hoặc admin) mới dùng được API này'
+        })
+      }
+      req.sellerUserId = u.userId
+      req.sellerRole = u.role
+      next()
+    })
+    .catch(() => res.status(401).json({ error: 'Unauthorized' }))
+}
+
+const SELLER_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,30}$/
+
+function normalizeSellerSlug(raw) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+}
+
+/** Hostname chữ thường, bỏ port và tiền tố www. */
+function canonicalHost(h) {
+  if (!h) return ''
+  const x = String(h).toLowerCase().split(':')[0].trim()
+  return x.startsWith('www.') ? x.slice(4) : x
+}
+
+const MAIN_DOMAINS_RAW = process.env.MAIN_DOMAINS || 'localhost,127.0.0.1'
+const MAIN_DOMAIN_SET = new Set(
+  MAIN_DOMAINS_RAW.split(/[\s,]+/)
+    .map((s) => canonicalHost(s.trim()))
+    .filter(Boolean)
+)
+
+function normalizeRequestHost(req) {
+  const raw = (req.headers['x-forwarded-host'] || req.headers.host || '').toString()
+  const first = raw.split(',')[0].trim()
+  return canonicalHost(first)
+}
+
+function isMainDomainHost(host) {
+  return MAIN_DOMAIN_SET.has(canonicalHost(host))
+}
+
+/** Chuẩn hoá tên miền riêng (seller): shop.example.com */
+function normalizeCustomDomainInput(raw) {
+  if (raw == null || String(raw).trim() === '') return { value: null }
+  let x = String(raw).trim().toLowerCase()
+  x = x.replace(/^https?:\/\//, '')
+  x = x.split('/')[0].split('?')[0]
+  x = x.split(':')[0]
+  if (x.startsWith('www.')) x = x.slice(4)
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(x)) {
+    return { error: 'Tên miền không hợp lệ (vd: shop.example.com)' }
+  }
+  return { value: x }
 }
 
 // ===================== PAYMENT / RESOURCE =====================
@@ -294,7 +502,23 @@ async function activatePayment(transferContent, amount) {
   }
 }
 
-async function checkAccountAlive(resourceValue) {
+/** Kiểm tra xem gói có phải Premium không (không phải Free/Ads) */
+function isNetflixPremiumPlan(planStr) {
+  if (!planStr || typeof planStr !== 'string') return false
+  const lower = planStr.toLowerCase().trim()
+  if (!lower) return false
+  // Các gói KHÔNG phải premium
+  const nonPremium = ['ads', 'free', 'with ads', 'standard with ads', 'basic with ads']
+  if (nonPremium.some(kw => lower.includes(kw))) return false
+  // Nếu không chứa keyword free/ads → coi là premium
+  return true
+}
+
+/**
+ * Kiểm tra chi tiết tài khoản: alive + thông tin gói
+ * @returns {{ alive: boolean, hasPremium: boolean, plan: string, email: string, screens: number|null, raw: object }}
+ */
+async function checkAccountDetails(resourceValue) {
   try {
     let cookie = resourceValue
     const idx = resourceValue.indexOf('NetflixId=')
@@ -320,11 +544,24 @@ async function checkAccountAlive(resourceValue) {
     })
 
     let data
-    try { data = result.json() } catch { return false }
-    return data?.status === 'SUCCESS'
+    try { data = result.json() } catch { return { alive: false, hasPremium: false, plan: null, email: null, screens: null, raw: null } }
+
+    const alive      = data?.status === 'SUCCESS'
+    const plan       = data?.plan || data?.subscription || null
+    const hasPremium = alive && isNetflixPremiumPlan(plan)
+    const email      = data?.email || null
+    const screens    = data?.max_streams != null ? parseInt(data.max_streams) : null
+
+    return { alive, hasPremium, plan, email, screens, raw: data }
   } catch {
-    return false
+    return { alive: false, hasPremium: false, plan: null, email: null, screens: null, raw: null }
   }
+}
+
+/** Backward-compat wrapper — chỉ trả true/false */
+async function checkAccountAlive(resourceValue) {
+  const details = await checkAccountDetails(resourceValue)
+  return details.alive
 }
 
 async function countAvailableAccounts() {
@@ -429,7 +666,7 @@ async function assignVerifiedAccount(subId) {
     }
   }
 
-  let candidates = []
+  let candidates
   {
     const client = await dbPool.connect()
     try {
@@ -494,41 +731,161 @@ async function assignVerifiedAccount(subId) {
   return null
 }
 
+// ── Assign stock product (non-Netflix auto-delivery) ──────────────
+async function assignStockProduct(subId, service) {
+  const client = await dbPool.connect()
+  try {
+    // Find first available stock resource for this service
+    const r = await client.query(
+      `SELECT id, value FROM resources
+       WHERE account_type = 'stock'
+         AND service = $1
+         AND status = 'available'
+       ORDER BY created_at ASC LIMIT 1`,
+      [service]
+    )
+    if (!r.rows.length) return null
+    const resource = r.rows[0]
+
+    // Mark resource as assigned
+    await client.query(
+      `UPDATE resources SET status = 'assigned', assigned_count = COALESCE(assigned_count,0) + 1
+       WHERE id = $1`,
+      [resource.id]
+    )
+    // Set delivery content on subscription
+    await client.query(
+      `UPDATE subscriptions SET login_link = $1 WHERE id = $2`,
+      [resource.value, subId]
+    )
+    return resource.value
+  } catch (err) {
+    console.error('[assignStockProduct]', err.message)
+    return null
+  } finally {
+    client.release()
+  }
+}
+
+// ── Get plan service & fulfillment_type ───────────────────────────
+async function getPlanMeta(planId) {
+  const client = await dbPool.connect()
+  try {
+    const r = await client.query(
+      `SELECT service, fulfillment_type FROM plans WHERE id = $1 LIMIT 1`,
+      [planId]
+    )
+    return r.rows[0] || { service: 'netflix', fulfillment_type: 'netflix' }
+  } catch {
+    return { service: 'netflix', fulfillment_type: 'netflix' }
+  } finally {
+    client.release()
+  }
+}
+
 async function processConfirmedPayment(transferContent, amount) {
   const outcome = await activatePayment(transferContent, Math.round(amount || 0))
   console.log(`[Auto-Pay] ${transferContent} →`, JSON.stringify(outcome))
   if (!outcome.success) return outcome
 
-  const loginLink = await assignVerifiedAccount(outcome.subscription_id)
-  if (!loginLink) {
-    console.warn(`[Auto-Pay] ⚠️ No alive account for sub ${outcome.subscription_id}`)
-  }
+  const planMeta = await getPlanMeta(outcome.plan)
+  const service = planMeta.service || 'netflix'
+  const fulfillment = planMeta.fulfillment_type || 'netflix'
+  const isNetflix = service === 'netflix'
+  const isStock   = fulfillment === 'stock'
+  const isManual  = fulfillment === 'manual'
 
   const cfg = await getAllSettings()
   const siteName = cfg.site_name || 'Netflix Store'
   const planLabel = outcome.plan || '?'
   const days = outcome.duration_days || '?'
-  const availCount = await countAvailableAccounts()
 
-  sendTelegram(
-    `🛒 <b>Đơn mới!</b> — ${siteName}\n` +
-    `📦 Gói: <b>${planLabel}</b> (${days} ngày)\n` +
-    `💰 Số tiền: <b>${Number(amount).toLocaleString('vi-VN')}₫</b>\n` +
-    `🔑 Nội dung CK: <code>${transferContent}</code>\n` +
-    `${loginLink ? '✅ Đã gán tài khoản tự động' : '⚠️ Chưa gán — kho trống!'}\n` +
-    `📦 Kho còn lại: <b>${availCount}</b> tài khoản`
-  )
+  let loginLink = null
 
-  if (availCount <= 3) {
+  if (isNetflix) {
+    // ── Netflix: assign from verified account pool ──
+    loginLink = await assignVerifiedAccount(outcome.subscription_id)
+    if (!loginLink) {
+      console.warn(`[Auto-Pay] ⚠️ No alive account for sub ${outcome.subscription_id}`)
+    }
+    const availCount = await countAvailableAccounts()
+
     sendTelegram(
-      `⚠️ <b>CẢNH BÁO KHO!</b>\n` +
-      `Chỉ còn <b>${availCount}</b> tài khoản sẵn sàng.\n` +
-      `Hãy bổ sung ngay để tránh gián đoạn!`
+      `🛒 <b>Đơn Netflix mới!</b> — ${siteName}\n` +
+      `📦 Gói: <b>${planLabel}</b> (${days} ngày)\n` +
+      `💰 Số tiền: <b>${Number(amount).toLocaleString('vi-VN')}₫</b>\n` +
+      `🔑 Nội dung CK: <code>${transferContent}</code>\n` +
+      `${loginLink ? '✅ Đã gán tài khoản tự động' : '⚠️ Chưa gán — kho trống!'}\n` +
+      `📦 Kho còn lại: <b>${availCount}</b> tài khoản`
     )
+    if (loginLink) {
+      await sendActivationEmail(outcome.subscription_id, loginLink, planLabel, days, cfg)
+    }
+
+  } else if (isStock) {
+    // ── Sản phẩm (stock): auto-assign từ kho sản phẩm ──
+    loginLink = await assignStockProduct(outcome.subscription_id, service)
+    if (!loginLink) {
+      console.warn(`[Auto-Pay] ⚠️ Kho sản phẩm ${service} trống cho sub ${outcome.subscription_id}`)
+    }
+    sendTelegram(
+      `🛒 <b>Đơn sản phẩm mới!</b> — ${siteName}\n` +
+      `📦 Gói: <b>${planLabel}</b> (${service})\n` +
+      `💰 Số tiền: <b>${Number(amount).toLocaleString('vi-VN')}₫</b>\n` +
+      `🔑 Nội dung CK: <code>${transferContent}</code>\n` +
+      `${loginLink ? '✅ Đã giao từ kho tự động' : '⚠️ Kho trống — cần giao tay!'}`
+    )
+
+  } else if (isManual) {
+    // ── Dịch vụ (manual): thông báo admin xử lý tay ──
+    sendTelegram(
+      `🔧 <b>Đơn dịch vụ cần xử lý!</b> — ${siteName}\n` +
+      `📦 Gói: <b>${planLabel}</b> (${service})\n` +
+      `💰 Số tiền: <b>${Number(amount).toLocaleString('vi-VN')}₫</b>\n` +
+      `🔑 Nội dung CK: <code>${transferContent}</code>\n` +
+      `⚠️ <b>Cần admin xử lý thủ công:</b> Vào Admin → Sản phẩm khác → Dịch vụ → Xác nhận đơn này.`
+    )
+    console.log(`[Auto-Pay] Manual service order: sub=${outcome.subscription_id}, plan=${planLabel}`)
   }
 
-  if (loginLink) {
-    await sendActivationEmail(outcome.subscription_id, loginLink, planLabel, days, cfg)
+  const availCount = await countAvailableAccounts()
+
+  // Notify seller store if applicable
+  try {
+    const pg = await dbPool.connect()
+    try {
+      const sr = await pg.query(
+        `SELECT s.telegram_bot_token, s.telegram_chat_id, s.display_name
+         FROM payments p
+         JOIN seller_stores s ON s.id = p.seller_store_id
+         WHERE p.transfer_content = $1 AND p.seller_store_id IS NOT NULL
+         LIMIT 1`,
+        [transferContent]
+      )
+      const row = sr.rows[0]
+      if (row?.telegram_bot_token && row.telegram_chat_id) {
+        await sendTelegramWithToken(
+          row.telegram_bot_token,
+          row.telegram_chat_id,
+          `🛒 <b>Đơn từ gian hàng của bạn</b> — ${row.display_name || ''}\n` +
+            `📦 Gói: <b>${planLabel}</b>\n` +
+            `💰 <b>${Number(amount).toLocaleString('vi-VN')}₫</b>\n` +
+            `🔑 CK: <code>${transferContent}</code>`
+        )
+      }
+    } finally {
+      pg.release()
+    }
+  } catch (e) {
+    console.warn('[Seller TG notify]', e.message)
+  }
+
+  if (isNetflix && availCount <= 3) {
+    sendTelegram(
+      `⚠️ <b>CẢNH BÁO KHO NETFLIX!</b>\n` +
+      `Chỉ còn <b>${availCount}</b> tài khoản sẵn sàng.\n` +
+      `Hãy bổ sung ngay!`
+    )
   }
 
   return { ...outcome, login_link: loginLink }
@@ -688,12 +1045,73 @@ async function checkSePayTransactions() {
     } else if (!err.response) {
       console.error('[SePay Poll] ❌ Network/timeout/unknown error:', msg.slice(0, 200))
     } else {
-      console.error('[SePay Poll]', err.message)
+    console.error('[SePay Poll]', err.message)
     }
   }
 }
 
 // ===================== EXPIRY / REMINDER / HEALTH =====================
+/**
+ * Tự động hủy đơn pending quá 30 phút chưa thanh toán.
+ * Chạy mỗi 5 phút.
+ */
+async function runPendingCancellationJob() {
+  let client
+  try {
+    client = await dbPool.connect()
+
+    // Tìm subscriptions pending quá 30 phút
+    const subs = await client.query(`
+      SELECT s.id, s.user_id, s.plan, s.created_at,
+             u.email AS user_email
+      FROM subscriptions s
+      LEFT JOIN auth.users u ON u.id = s.user_id
+      WHERE s.status = 'pending'
+        AND s.created_at < NOW() - INTERVAL '30 minutes'
+    `)
+
+    if (subs.rowCount === 0) return 0
+
+    const ids = subs.rows.map(r => r.id)
+    console.log(`[AutoCancel] Cancelling ${ids.length} pending subscription(s) older than 30min`)
+
+    // Hủy subscriptions
+    await client.query(`
+      UPDATE subscriptions
+      SET status = 'cancelled'
+      WHERE id = ANY($1::uuid[])
+        AND status = 'pending'
+    `, [ids])
+
+    // Hủy payments liên quan
+    await client.query(`
+      UPDATE payments
+      SET status = 'failed'
+      WHERE subscription_id = ANY($1::uuid[])
+        AND status = 'pending'
+    `, [ids])
+
+    // Telegram notify admin (tổng hợp)
+    if (ids.length > 0) {
+      sendTelegram(
+        `🗑️ <b>Tự động hủy ${ids.length} đơn hàng</b>\n` +
+        `Lý do: Chưa thanh toán sau 30 phút.\n` +
+        subs.rows.slice(0, 5).map(r =>
+          `• ${r.user_email || r.user_id} — ${r.plan} (${new Date(r.created_at).toLocaleString('vi-VN')})`
+        ).join('\n') +
+        (ids.length > 5 ? `\n... và ${ids.length - 5} đơn khác.` : '')
+      )
+    }
+
+    return ids.length
+  } catch (err) {
+    console.error('[AutoCancel] ❌', err.message)
+    return 0
+  } finally {
+    if (client) client.release()
+  }
+}
+
 async function runExpiryJob() {
   let client
   try {
@@ -725,11 +1143,11 @@ async function runExpiryJob() {
         await client.query(`
           UPDATE resources
           SET assigned_count = GREATEST(0, COALESCE(assigned_count, 1) - 1),
-              status = CASE
-                WHEN GREATEST(0, COALESCE(assigned_count, 1) - 1) < COALESCE(max_slots, 5)
-                  AND status = 'full' THEN 'available'
-                ELSE status
-              END
+                 status = CASE
+                   WHEN GREATEST(0, COALESCE(assigned_count, 1) - 1) < COALESCE(max_slots, 5)
+                     AND status = 'full' THEN 'available'
+                   ELSE status
+                 END
           WHERE value = ANY($1::text[])
             AND status != 'dead'
         `, [expiredLinks])
@@ -807,7 +1225,7 @@ async function runExpiryReminder() {
 async function runHealthCheck() {
   console.log('[HealthCheck] Starting inventory health check...')
   let client
-  let candidates = []
+  let candidates
 
   try {
     client = await dbPool.connect()
@@ -933,34 +1351,48 @@ app.post('/api/check-cookie', async (req, res) => {
   try {
     const { cookie } = req.body
     if (!cookie) return res.status(400).json({ success: false, message: 'Missing cookie' })
-
-    const bodyStr = new URLSearchParams({
-      raw_cookie: cookie.trim(),
-      ajax: '1',
-      is_bulk: '1'
-    }).toString()
-
-    const result = await nodeRequest('https://nftoken.site/cookies/index.php', {
-      method: 'POST',
-      headers: {
-        'accept': 'application/json, text/javascript, */*; q=0.01',
-        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'origin': 'https://nftoken.site',
-        'referer': 'https://nftoken.site/cookies/',
-        'user-agent': 'Mozilla/5.0',
-        'x-requested-with': 'XMLHttpRequest',
-      },
-      body: bodyStr
-    })
-
-    if (result.status !== 200) return res.json({ alive: false })
-
-    let data
-    try { data = result.json() } catch { return res.json({ alive: false }) }
-
-    res.json({ alive: data && data.status === 'SUCCESS', raw: data })
+    const details = await checkAccountDetails(cookie)
+    res.json({ alive: details.alive, raw: details.raw })
   } catch (err) {
     res.status(500).json({ alive: false, message: err.message })
+  }
+})
+
+/**
+ * POST /api/check-plan-status
+ * Kiểm tra cookie còn sống VÀ có gói Premium hay không.
+ * Body: { cookie: string }
+ * Response: { alive, hasPremium, plan, email, screens, needsWarranty, reason }
+ */
+app.post('/api/check-plan-status', async (req, res) => {
+  try {
+    const { cookie } = req.body
+    if (!cookie) return res.status(400).json({ success: false, message: 'Missing cookie' })
+
+    const details = await checkAccountDetails(cookie)
+
+    let needsWarranty = false
+    let reason = null
+
+    if (!details.alive) {
+      needsWarranty = true
+      reason = 'cookie_dead'          // Cookie hết hạn / die
+    } else if (!details.hasPremium) {
+      needsWarranty = true
+      reason = 'plan_lost'            // Cookie sống nhưng mất gói Premium
+    }
+
+    res.json({
+      alive:          details.alive,
+      hasPremium:     details.hasPremium,
+      plan:           details.plan,
+      email:          details.email,
+      screens:        details.screens,
+      needsWarranty,
+      reason,         // 'cookie_dead' | 'plan_lost' | null
+    })
+  } catch (err) {
+    res.status(500).json({ alive: false, hasPremium: false, needsWarranty: true, reason: 'error', message: err.message })
   }
 })
 
@@ -1048,6 +1480,57 @@ app.post('/api/tv-submit', async (req, res) => {
     res.json({ success: false, message: `HTTP ${result.status} — ${location || 'Không có redirect'}` })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+/** Công khai: bài hướng dẫn (đã xuất bản). Dữ liệu lưu settings.guides_config (JSON). */
+app.get('/api/guides', async (req, res) => {
+  try {
+    const raw = await getSetting('guides_config')
+    let cfg = null
+    if (raw && String(raw).trim()) {
+      try {
+        cfg = JSON.parse(String(raw))
+      } catch {
+        cfg = null
+      }
+    }
+    const useFallback = !cfg || !Array.isArray(cfg.posts)
+    const introTitle = (cfg && typeof cfg.introTitle === 'string' && cfg.introTitle.trim())
+      ? cfg.introTitle.trim()
+      : GUIDES_PUBLIC_FALLBACK.introTitle
+    const introSubtitle = (cfg && typeof cfg.introSubtitle === 'string')
+      ? cfg.introSubtitle
+      : GUIDES_PUBLIC_FALLBACK.introSubtitle
+    let posts = useFallback ? GUIDES_PUBLIC_FALLBACK.posts : cfg.posts
+    if (!Array.isArray(posts)) posts = []
+
+    const out = posts
+      .filter((p) => p && typeof p === 'object' && p.published !== false)
+      .map((p) => {
+        const slug = String(p.slug || p.id || '')
+          .trim()
+          .replace(/^\/+|\/+$/g, '')
+        return {
+          id: String(p.id || slug || ''),
+          slug,
+          title: String(p.title || '').trim(),
+          bodyMd: String(p.bodyMd || p.body || ''),
+          youtubeUrl: String(p.youtubeUrl || '').trim(),
+          updatedAt: p.updatedAt || null,
+          order: Number.isFinite(Number(p.order)) ? Number(p.order) : 0
+        }
+      })
+      .filter((p) => p.slug && p.title)
+      .sort((a, b) => a.order - b.order)
+
+    res.json({
+      introTitle,
+      introSubtitle,
+      posts: out
+    })
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Lỗi guides' })
   }
 })
 
@@ -1174,6 +1657,15 @@ app.post('/api/admin/run-expiry', requireAdmin, async (req, res) => {
   }
 })
 
+app.post('/api/admin/cancel-pending', requireAdmin, async (req, res) => {
+  try {
+    const count = await runPendingCancellationJob()
+    res.json({ success: true, cancelled: count, message: `Đã hủy ${count} đơn chờ quá 30 phút` })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
 app.post('/api/admin/health-check', requireAdmin, async (req, res) => {
   try {
     const result = await runHealthCheck()
@@ -1209,6 +1701,10 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       dbPool.query(`
         SELECT
           COUNT(*) FILTER (WHERE status = 'available') AS available,
+          COUNT(*) FILTER (WHERE status = 'available'
+            AND COALESCE(account_type,'shared') != 'stock') AS netflix_available,
+          COUNT(*) FILTER (WHERE status = 'available'
+            AND account_type = 'stock') AS stock_available,
           COUNT(*) FILTER (WHERE status = 'full') AS full,
           COUNT(*) FILTER (WHERE status = 'dead') AS dead,
           COUNT(*) AS total
@@ -1268,7 +1764,11 @@ app.patch('/api/admin/settings', requireAdmin, async (req, res) => {
       }
       await client.query('COMMIT')
     } catch (e) {
-      try { await client.query('ROLLBACK') } catch (_) { }
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ROLLBACK có thể lỗi nếu kết nối đứt */
+      }
       throw e
     } finally {
       client.release()
@@ -1307,7 +1807,519 @@ app.get('/api/sepay-debug', requireAdmin, async (req, res) => {
   }
 })
 
+// ===================== SELLER PUBLIC BUNDLE (giá + thanh toán) =====================
+async function fetchMergedPlansForStore(client, storeId) {
+  const r = await client.query(
+    `SELECT p.id, p.name, p.duration_days, p.price AS base_price,
+            COALESCE(sp.price, p.price)::int AS price
+     FROM plans p
+     LEFT JOIN seller_store_plan_prices sp
+       ON sp.plan_id = p.id AND sp.seller_store_id = $1
+     ORDER BY p.price ASC`,
+    [storeId]
+  )
+  return r.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    duration_days: row.duration_days,
+    price: row.price,
+    base_price: row.base_price
+  }))
+}
+
+function resolvePaymentDisplay(storeRow, settings) {
+  const s = settings || {}
+  const useSeller = storeRow && storeRow.bank_account && String(storeRow.bank_account).trim() !== ''
+  const bin = (v) => {
+    const t = v && String(v).trim()
+    return t && /^\d{6}$/.test(t) ? t : '970422'
+  }
+  return {
+    source: useSeller ? 'seller' : 'site',
+    bank_name: useSeller ? (storeRow.bank_name || 'Ngân hàng') : (s.bank_name || 'MB Bank'),
+    bank_account: useSeller ? storeRow.bank_account : (s.bank_account || ''),
+    bank_owner: useSeller ? (storeRow.bank_owner || '') : (s.bank_owner || ''),
+    momo_number: useSeller ? (storeRow.momo_number || '') : (s.momo_number || ''),
+    momo_name: useSeller ? (storeRow.momo_name || '') : (s.momo_name || ''),
+    vietqr_bank_bin: useSeller ? bin(storeRow.vietqr_bank_bin) : bin(s.vietqr_bank_bin)
+  }
+}
+
+function pickPublicStoreFields(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    slug: row.slug,
+    display_name: row.display_name,
+    tagline: row.tagline,
+    theme_primary: row.theme_primary,
+    custom_domain: row.custom_domain,
+    created_at: row.created_at
+  }
+}
+
+async function buildPublicStoreBundle(client, storeRow) {
+  const settings = await getAllSettings()
+  let plans
+  try {
+    plans = await fetchMergedPlansForStore(client, storeRow.id)
+  } catch (e) {
+    if (e.message && e.message.includes('seller_store_plan_prices')) {
+      plans = []
+    } else throw e
+  }
+  const payment = resolvePaymentDisplay(storeRow, settings)
+  return { store: pickPublicStoreFields(storeRow), plans, payment }
+}
+
+function maskSellerStoreResponse(row) {
+  if (!row) return null
+  const o = { ...row }
+  if (o.gmail_app_password) {
+    o.has_gmail_password = true
+    delete o.gmail_app_password
+  }
+  if (o.telegram_bot_token) {
+    o.has_telegram_bot_token = true
+    delete o.telegram_bot_token
+  }
+  return o
+}
+
+// ===================== SELLER STORES (web con) =====================
+/** Phải đặt TRƯỚC /api/store/:slug — nhận diện gian hàng theo Host (tên miền riêng) */
+app.get('/api/store/by-host', async (req, res) => {
+  try {
+    const host = normalizeRequestHost(req)
+    if (!host || isMainDomainHost(host)) {
+      return res.status(404).json({ error: 'not_custom_domain' })
+    }
+    const client = await dbPool.connect()
+    try {
+      const r = await client.query(
+        `SELECT * FROM seller_stores
+         WHERE lower(trim(custom_domain)) = $1 AND is_active = true
+         LIMIT 1`,
+        [host]
+      )
+      if (r.rows.length === 0) return res.status(404).json({ error: 'Không tìm thấy gian hàng cho tên miền này' })
+      const bundle = await buildPublicStoreBundle(client, r.rows[0])
+      res.json(bundle)
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('custom_domain')) {
+      return res.status(503).json({ error: 'Chạy supabase/fix_seller_custom_domain.sql' })
+    }
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.get('/api/checkout/quote', async (req, res) => {
+  try {
+    const planId = String(req.query.planId || '').trim()
+    const sellerStoreId = String(req.query.sellerStoreId || '').trim()
+    if (!planId) return res.status(400).json({ message: 'Thiếu planId' })
+    const client = await dbPool.connect()
+    try {
+      const pr = await client.query(`SELECT * FROM plans WHERE id = $1`, [planId])
+      if (!pr.rows[0]) return res.status(404).json({ message: 'Gói không tồn tại' })
+      const base = pr.rows[0]
+      let price = base.price
+      let payment
+      if (sellerStoreId) {
+        const sp = await client.query(
+          `SELECT price FROM seller_store_plan_prices WHERE seller_store_id = $1 AND plan_id = $2`,
+          [sellerStoreId, planId]
+        )
+        if (sp.rows[0]) price = sp.rows[0].price
+        const st = await client.query(
+          `SELECT * FROM seller_stores WHERE id = $1 AND is_active = true`,
+          [sellerStoreId]
+        )
+        if (!st.rows[0]) return res.status(404).json({ message: 'Gian hàng không tồn tại' })
+        payment = resolvePaymentDisplay(st.rows[0], await getAllSettings())
+      } else {
+        payment = resolvePaymentDisplay(null, await getAllSettings())
+      }
+      res.json({
+        plan: {
+          id: base.id,
+          name: base.name,
+          duration_days: base.duration_days,
+          price,
+          base_price: base.price
+        },
+        payment
+      })
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+app.get('/api/public/plans', async (req, res) => {
+  try {
+    const sellerStoreId = String(req.query.sellerStoreId || '').trim()
+    if (!sellerStoreId) return res.status(400).json({ message: 'Thiếu sellerStoreId' })
+    const client = await dbPool.connect()
+    try {
+      const plans = await fetchMergedPlansForStore(client, sellerStoreId)
+      res.json({ plans })
+    } catch (e) {
+      if (e.message && e.message.includes('seller_store_plan_prices')) {
+        return res.status(503).json({ message: 'Chạy supabase/fix_seller_reseller_config.sql' })
+      }
+      throw e
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+app.get('/api/store/:slug', async (req, res) => {
+  try {
+    const slug = normalizeSellerSlug(req.params.slug)
+    if (!SELLER_SLUG_RE.test(slug)) {
+      return res.status(400).json({ error: 'Slug không hợp lệ' })
+    }
+    const client = await dbPool.connect()
+    try {
+      const r = await client.query(`SELECT * FROM seller_stores WHERE slug = $1 AND is_active = true LIMIT 1`, [slug])
+      if (r.rows.length === 0) return res.status(404).json({ error: 'Không tìm thấy gian hàng' })
+      const bundle = await buildPublicStoreBundle(client, r.rows[0])
+      res.json(bundle)
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('seller_stores')) {
+      return res.status(503).json({ error: 'Chưa cấu hình bảng seller_stores (chạy supabase/fix_seller_stores.sql)' })
+    }
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.get('/api/seller/store', requireSellerOrAdmin, async (req, res) => {
+  try {
+    const client = await dbPool.connect()
+    try {
+      const r = await client.query(`SELECT * FROM seller_stores WHERE owner_id = $1 LIMIT 1`, [req.sellerUserId])
+      res.json(maskSellerStoreResponse(r.rows[0] || null))
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('seller_stores')) {
+      return res.status(503).json({ message: 'Chưa có bảng seller_stores' })
+    }
+    res.status(500).json({ message: err.message })
+  }
+})
+
+app.post('/api/seller/store', requireSellerOrAdmin, async (req, res) => {
+  try {
+    const body = req.body || {}
+    const slug = normalizeSellerSlug(body.slug)
+    const display_name = String(body.display_name || '').trim().slice(0, 120)
+    const tagline = String(body.tagline || '').trim().slice(0, 240)
+    const theme_primary = String(body.theme_primary || '#E50914').trim().slice(0, 32)
+    let custom_domain = null
+    if (body.custom_domain != null && String(body.custom_domain).trim() !== '') {
+      const d = normalizeCustomDomainInput(body.custom_domain)
+      if (d.error) return res.status(400).json({ message: d.error })
+      custom_domain = d.value
+      if (isMainDomainHost(custom_domain)) {
+        return res.status(400).json({ message: 'Không dùng tên miền chính của hệ thống làm tên miền gian hàng' })
+      }
+    }
+
+    if (!SELLER_SLUG_RE.test(slug)) {
+      return res.status(400).json({ message: 'Slug 3–32 ký tự, chữ thường, số và dấu gạch ngang' })
+    }
+    if (!display_name) return res.status(400).json({ message: 'Thiếu tên hiển thị (display_name)' })
+
+    const client = await dbPool.connect()
+    try {
+      const ex = await client.query(`SELECT id FROM seller_stores WHERE owner_id = $1 LIMIT 1`, [req.sellerUserId])
+      if (ex.rows.length > 0) {
+        return res.status(409).json({ message: 'Bạn đã có gian hàng — dùng PATCH để sửa' })
+      }
+      const taken = await client.query(`SELECT id FROM seller_stores WHERE slug = $1 LIMIT 1`, [slug])
+      if (taken.rows.length > 0) return res.status(409).json({ message: 'Slug đã được dùng' })
+
+      const ins = await client.query(
+        `INSERT INTO seller_stores (owner_id, slug, display_name, tagline, theme_primary, custom_domain)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, slug, display_name, tagline, theme_primary, is_active, created_at, custom_domain`,
+        [req.sellerUserId, slug, display_name, tagline, theme_primary, custom_domain]
+      )
+      res.status(201).json(ins.rows[0])
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    if (err.code === '23505') {
+      const m = String(err.message || '')
+      if (m.includes('custom_domain')) return res.status(409).json({ message: 'Tên miền này đã được dùng' })
+      return res.status(409).json({ message: 'Slug trùng' })
+    }
+    if (err.message && err.message.includes('seller_stores')) {
+      return res.status(503).json({ message: 'Chưa có bảng seller_stores' })
+    }
+    if (err.message && err.message.includes('custom_domain')) {
+      return res.status(503).json({ message: 'Chạy supabase/fix_seller_custom_domain.sql' })
+    }
+    res.status(500).json({ message: err.message })
+  }
+})
+
+app.patch('/api/seller/store', requireSellerOrAdmin, async (req, res) => {
+  try {
+    const body = req.body || {}
+    const client = await dbPool.connect()
+    try {
+      const cur = await client.query(`SELECT id FROM seller_stores WHERE owner_id = $1 LIMIT 1`, [req.sellerUserId])
+      if (cur.rows.length === 0) return res.status(404).json({ message: 'Chưa có gian hàng — dùng POST để tạo' })
+
+      const updates = []
+      const vals = []
+      let n = 1
+
+      if (body.slug != null) {
+        const slug = normalizeSellerSlug(body.slug)
+        if (!SELLER_SLUG_RE.test(slug)) {
+          return res.status(400).json({ message: 'Slug không hợp lệ' })
+        }
+        updates.push(`slug = $${n++}`)
+        vals.push(slug)
+      }
+      if (body.display_name != null) {
+        updates.push(`display_name = $${n++}`)
+        vals.push(String(body.display_name).trim().slice(0, 120))
+      }
+      if (body.tagline != null) {
+        updates.push(`tagline = $${n++}`)
+        vals.push(String(body.tagline).trim().slice(0, 240))
+      }
+      if (body.theme_primary != null) {
+        updates.push(`theme_primary = $${n++}`)
+        vals.push(String(body.theme_primary).trim().slice(0, 32))
+      }
+      if (body.is_active != null) {
+        updates.push(`is_active = $${n++}`)
+        vals.push(!!body.is_active)
+      }
+      if (body.custom_domain !== undefined) {
+        const d = normalizeCustomDomainInput(body.custom_domain)
+        if (d.error) return res.status(400).json({ message: d.error })
+        if (d.value && isMainDomainHost(d.value)) {
+          return res.status(400).json({ message: 'Không dùng tên miền chính của hệ thống làm tên miền gian hàng' })
+        }
+        updates.push(`custom_domain = $${n++}`)
+        vals.push(d.value)
+      }
+      if (body.bank_name != null) {
+        updates.push(`bank_name = $${n++}`)
+        vals.push(String(body.bank_name).trim().slice(0, 120))
+      }
+      if (body.bank_account != null) {
+        updates.push(`bank_account = $${n++}`)
+        vals.push(String(body.bank_account).trim().slice(0, 64))
+      }
+      if (body.bank_owner != null) {
+        updates.push(`bank_owner = $${n++}`)
+        vals.push(String(body.bank_owner).trim().slice(0, 120))
+      }
+      if (body.momo_number != null) {
+        updates.push(`momo_number = $${n++}`)
+        vals.push(String(body.momo_number).trim().slice(0, 32))
+      }
+      if (body.momo_name != null) {
+        updates.push(`momo_name = $${n++}`)
+        vals.push(String(body.momo_name).trim().slice(0, 120))
+      }
+      if (body.vietqr_bank_bin != null) {
+        const b = String(body.vietqr_bank_bin).trim()
+        if (b && !/^\d{6}$/.test(b)) return res.status(400).json({ message: 'Mã BIN VietQR phải đúng 6 chữ số' })
+        updates.push(`vietqr_bank_bin = $${n++}`)
+        vals.push(b || null)
+      }
+      if (body.gmail_user != null) {
+        updates.push(`gmail_user = $${n++}`)
+        vals.push(String(body.gmail_user).trim().slice(0, 200))
+      }
+      if (body.gmail_app_password !== undefined) {
+        const gp = body.gmail_app_password
+        if (gp === null || gp === '') {
+          updates.push(`gmail_app_password = $${n++}`)
+          vals.push(null)
+        } else if (String(gp).trim()) {
+          updates.push(`gmail_app_password = $${n++}`)
+          vals.push(String(gp).slice(0, 128))
+        }
+      }
+      if (body.telegram_bot_token !== undefined) {
+        const t = body.telegram_bot_token
+        if (t === null || t === '') {
+          updates.push(`telegram_bot_token = $${n++}`)
+          vals.push(null)
+        } else if (String(t).trim()) {
+          updates.push(`telegram_bot_token = $${n++}`)
+          vals.push(String(t).slice(0, 256))
+        }
+      }
+      if (body.telegram_chat_id != null) {
+        updates.push(`telegram_chat_id = $${n++}`)
+        vals.push(String(body.telegram_chat_id).trim().slice(0, 64))
+      }
+      if (body.reseller_guide != null) {
+        updates.push(`reseller_guide = $${n++}`)
+        vals.push(String(body.reseller_guide).slice(0, 20000))
+      }
+
+      if (updates.length === 0) return res.status(400).json({ message: 'Không có trường cập nhật' })
+
+      updates.push(`updated_at = now()`)
+      vals.push(req.sellerUserId)
+      const whereIdx = vals.length
+
+      const q = `UPDATE seller_stores SET ${updates.join(', ')} WHERE owner_id = $${whereIdx} RETURNING *`
+      const r = await client.query(q, vals)
+      res.json(maskSellerStoreResponse(r.rows[0]))
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    if (err.code === '23505') {
+      const m = String(err.message || '')
+      if (m.includes('custom_domain')) return res.status(409).json({ message: 'Tên miền này đã được dùng' })
+      return res.status(409).json({ message: 'Slug trùng' })
+    }
+    if (err.message && err.message.includes('custom_domain')) {
+      return res.status(503).json({ message: 'Chạy supabase/fix_seller_custom_domain.sql' })
+    }
+    res.status(500).json({ message: err.message })
+  }
+})
+
+app.get('/api/seller/plan-prices', requireSellerOrAdmin, async (req, res) => {
+  try {
+    const client = await dbPool.connect()
+    try {
+      const st = await client.query(`SELECT id FROM seller_stores WHERE owner_id = $1 LIMIT 1`, [req.sellerUserId])
+      if (!st.rows[0]) return res.json({ plans: [] })
+      const plans = await fetchMergedPlansForStore(client, st.rows[0].id)
+      res.json({ plans })
+    } catch (e) {
+      if (e.message && e.message.includes('seller_store_plan_prices')) {
+        return res.status(503).json({ message: 'Chạy supabase/fix_seller_reseller_config.sql' })
+      }
+      throw e
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+app.put('/api/seller/plan-prices', requireSellerOrAdmin, async (req, res) => {
+  try {
+    const prices = req.body?.prices
+    if (!prices || typeof prices !== 'object' || Array.isArray(prices)) {
+      return res.status(400).json({ message: 'Body cần { prices: { month: 60000, ... } }' })
+    }
+    const client = await dbPool.connect()
+    try {
+      const st = await client.query(`SELECT id FROM seller_stores WHERE owner_id = $1 LIMIT 1`, [req.sellerUserId])
+      if (!st.rows[0]) return res.status(404).json({ message: 'Chưa có gian hàng' })
+      const storeId = st.rows[0].id
+      await client.query('BEGIN')
+      for (const [planId, rawPrice] of Object.entries(prices)) {
+        const price = parseInt(rawPrice, 10)
+        if (Number.isNaN(price) || price <= 0) continue
+        await client.query(
+          `INSERT INTO seller_store_plan_prices (seller_store_id, plan_id, price)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (seller_store_id, plan_id) DO UPDATE SET price = EXCLUDED.price`,
+          [storeId, planId, price]
+        )
+      }
+      await client.query('COMMIT')
+      const merged = await fetchMergedPlansForStore(client, storeId)
+      res.json({ success: true, plans: merged })
+    } catch (e) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ignore */
+      }
+      if (e.message && String(e.message).includes('không được thấp hơn')) {
+        return res.status(400).json({ message: e.message })
+      }
+      if (e.message && e.message.includes('seller_store_plan_prices')) {
+        return res.status(503).json({ message: 'Chạy supabase/fix_seller_reseller_config.sql' })
+      }
+      throw e
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
+/** Thống kê đơn thành công gắn với gian hàng (cần cột seller_store_id + migration) */
+app.get('/api/seller/stats', requireSellerOrAdmin, async (req, res) => {
+  try {
+    const client = await dbPool.connect()
+    try {
+      const st = await client.query(`SELECT id, slug, display_name FROM seller_stores WHERE owner_id = $1 LIMIT 1`, [
+        req.sellerUserId
+      ])
+      if (!st.rows[0]) return res.json({ store: null, orders: 0, revenue: 0 })
+
+      const id = st.rows[0].id
+      let orders = 0
+      let revenue = 0
+      try {
+        const r = await client.query(
+          `SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount), 0)::bigint AS rev
+           FROM payments WHERE seller_store_id = $1 AND status = 'success'`,
+          [id]
+        )
+        orders = r.rows[0]?.cnt ?? 0
+        revenue = Number(r.rows[0]?.rev ?? 0)
+      } catch (e) {
+        if (e.message && e.message.includes('seller_store_id')) {
+          return res.json({ store: st.rows[0], orders: 0, revenue: 0, _note: 'Chạy fix_seller_tracking.sql' })
+        }
+        throw e
+      }
+      res.json({ store: st.rows[0], orders, revenue })
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
+
 // ===================== SCHEDULERS =====================
+
+// Auto-cancel pending orders > 30 min — chạy mỗi 5 phút
+setTimeout(() => {
+  const tick = () => runPendingCancellationJob().catch(err => console.error('[AutoCancel]', err.message))
+  tick()
+  setInterval(tick, 5 * 60 * 1000) // 5 phút
+}, 8000)
+
 setTimeout(() => {
   checkSePayTransactions()
   setInterval(checkSePayTransactions, 5000)
@@ -1356,11 +2368,18 @@ app.listen(PORT, () => {
   console.log(`🚀 Netflix Store server → http://localhost:${PORT}`)
   console.log(`   POST /api/get-link`)
   console.log(`   POST /api/check-cookie`)
+  console.log(`   GET  /api/guides`)
   console.log(`   POST /api/tv-init`)
   console.log(`   POST /api/tv-submit`)
   console.log(`   POST /sepay-webhook`)
   console.log(`   GET  /api/payment-status/:code`)
   console.log(`   GET  /api/sepay-debug`)
   console.log(`   GET  /api/test-db`)
+  console.log(`   GET  /api/store/by-host  (tên miền riêng → Host header)`)
+  console.log(`   GET  /api/store/:slug  (gian hàng công khai)`)
+  console.log(`   GET/PATCH /api/seller/store  (seller JWT)`)
+  console.log(`   GET  /api/checkout/quote  /api/public/plans  (giá đại lý)`)
+  console.log(`   GET/PUT /api/seller/plan-prices`)
+  console.log(`   MAIN_DOMAINS (site chính, không coi là gian hàng): ${[...MAIN_DOMAIN_SET].join(', ') || '(empty)'}`)
   console.log(`   SePay polling: every 5s ${SEPAY_API_TOKEN ? '✅ ACTIVE' : '❌ NO TOKEN'}`)
 })

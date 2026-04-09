@@ -12,12 +12,6 @@ export function formatDate(dateStr) {
   })
 }
 
-export function formatShortDate(dateStr) {
-  if (!dateStr) return '—'
-  const d = new Date(dateStr)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('vi-VN')
-}
 
 export function statusLabel(status) {
   const map = {

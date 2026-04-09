@@ -1,4 +1,5 @@
 import { isLoggedIn, isAdmin, onAuthChange } from './utils/auth.js'
+import { observeReveal } from './utils/reveal.js'
 
 const routes = {}
 let currentCleanup = null
@@ -6,11 +7,16 @@ let currentCleanup = null
 const PAGE_TITLES = {
   '/':          'Netflix Store — Mua tài khoản Netflix giá rẻ',
   '/plans':     'Bảng giá — Netflix Store',
+  '/products':  'Dịch vụ — Netflix Store',
+  '/movies':    'Gợi ý phim — Netflix Store',
   '/login':     'Đăng nhập — Netflix Store',
   '/dashboard': 'Tài khoản của tôi — Netflix Store',
   '/admin':     'Quản trị — Netflix Store',
   '/tools':     'Tiện ích Netflix — Netflix Store',
   '/payment':   'Thanh toán — Netflix Store',
+  '/s':         'Gian hàng — Netflix Store',
+  '/api-docs':  'API — Netflix Store',
+  '/guides':    'Hướng dẫn — Netflix Store',
 }
 
 function setPageTitle(hash) {
@@ -31,30 +37,35 @@ export function getHashPath() {
   return window.location.hash.slice(1) || '/'
 }
 
-export function getRouteParams() {
-  const hash = getHashPath()
-  const parts = hash.split('/')
-  return parts
-}
+
+// Track navigation to cancel stale renders
+let routeVersion = 0
 
 export async function handleRoute() {
   const container = document.getElementById('page')
   if (!container) return
 
-  // Cleanup previous page
+  // Increment version — nếu có route mới chạy trước khi cái này xong → bỏ qua
+  const myVersion = ++routeVersion
+
+  // 1. Cleanup trang trước
   if (currentCleanup && typeof currentCleanup === 'function') {
     currentCleanup()
     currentCleanup = null
   }
 
-  const hash = getHashPath()
+  // 2. Scroll về đầu trang ngay lập tức
+  window.scrollTo({ top: 0, behavior: 'instant' })
 
-  // Route matching
+  // 3. Strip query string trước khi match route
+  const rawHash = getHashPath()
+  const hash = rawHash.split('?')[0] || '/'
+
+  // 4. Route matching
   let handler = routes[hash]
   let params = {}
 
   if (!handler) {
-    // Try pattern matching e.g. /payment/:id
     for (const [pattern, h] of Object.entries(routes)) {
       const patternParts = pattern.split('/')
       const hashParts = hash.split('/')
@@ -66,90 +77,82 @@ export async function handleRoute() {
         if (patternParts[i].startsWith(':')) {
           extractedParams[patternParts[i].slice(1)] = hashParts[i]
         } else if (patternParts[i] !== hashParts[i]) {
-          match = false
-          break
+          match = false; break
         }
       }
-      if (match) {
-        handler = h
-        params = extractedParams
-        break
-      }
+      if (match) { handler = h; params = extractedParams; break }
     }
   }
 
   if (!handler) {
+    container.classList.remove('page-enter', 'page-exit')
     container.innerHTML = `
       <div class="page-container" style="text-align:center;padding:100px 20px;">
         <h1>404</h1>
         <p>Trang không tồn tại</p>
         <a href="#/" class="btn btn-primary" style="margin-top:20px;display:inline-block;">Về trang chủ</a>
-      </div>
-    `
+      </div>`
     return
   }
 
-  // Route guards
+  // 5. Route guards
   const protectedRoutes = ['/dashboard', '/admin']
   const isProtected = protectedRoutes.some(r => hash.startsWith(r))
 
-  // Đã đăng nhập → không cho vào trang login/register
   const guestOnlyRoutes = ['/login', '/register']
   if (guestOnlyRoutes.some(r => hash.startsWith(r)) && isLoggedIn()) {
-    navigate('/dashboard')
-    return
+    navigate('/dashboard'); return
   }
-
   if (isProtected && !isLoggedIn()) {
-    navigate('/login')
-    return
+    navigate('/login'); return
   }
-
   if (hash.startsWith('/admin') && !isAdmin()) {
-    // Nếu đã đăng nhập nhưng profile chưa load xong → đợi profile
     if (isLoggedIn()) {
       container.innerHTML = '<div class="loading"><div class="spinner"></div></div>'
       await new Promise(resolve => {
         const unsub = onAuthChange(() => { unsub(); resolve() })
-        // Nếu profile load trong 2s thì proceed, không thì redirect
         setTimeout(resolve, 2000)
       })
       if (!isAdmin()) { navigate('/'); return }
     } else {
-      navigate('/')
-      return
+      navigate('/'); return
     }
   }
 
+  // 6. Nếu navigation khác đã chạy trong lúc chờ guard → bỏ qua
+  if (myVersion !== routeVersion) return
+
   setPageTitle(hash)
 
-  // Reset opacity trước — đảm bảo luôn hiển thị dù có lỗi gì
-  container.style.opacity = '1'
-  container.style.transform = 'none'
-  container.style.transition = 'none'
+  // 7. Hiện spinner ngay (không animation exit để tránh delay nội dung)
+  container.classList.remove('page-enter', 'page-exit')
   container.innerHTML = '<div class="loading"><div class="spinner"></div></div>'
 
+  // 8. Render trang
   try {
     const cleanup = await handler(container, params)
+    if (myVersion !== routeVersion) return // route khác đã chạy → bỏ
     currentCleanup = cleanup
   } catch (err) {
     console.error('Route error:', err)
+    if (myVersion !== routeVersion) return
     container.innerHTML = `
       <div class="page-container" style="text-align:center;padding:120px 20px;">
         <div style="font-size:48px;margin-bottom:16px;">⚠️</div>
         <h2 style="color:var(--text-primary);margin-bottom:8px;">Có lỗi xảy ra</h2>
         <p style="color:var(--text-secondary);margin-bottom:24px;">${err.message}</p>
         <a href="#/" class="btn btn-primary">Về trang chủ</a>
-      </div>
-    `
+      </div>`
   }
 
-  // Fade in nhẹ sau khi render xong
-  container.style.transition = 'opacity .2s ease'
-  container.style.opacity   = '0'
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    container.style.opacity = '1'
-  }))
+  // 9. Enter animation nhẹ sau khi nội dung đã có
+  requestAnimationFrame(() => {
+    if (myVersion !== routeVersion) return
+    container.classList.add('page-enter')
+    container.addEventListener('animationend', () => container.classList.remove('page-enter'), { once: true })
+    // Scroll reveal cho elements mới
+    observeReveal(container)
+  })
 }
 
 export function initRouter() {
