@@ -457,6 +457,96 @@ export async function claimWarranty(subscriptionId) {
   return data
 }
 
+/** Gọi API kèm JWT Supabase (session user) */
+export async function userApiFetch(url, init = {}) {
+  const { data: { session } } = await supabase.auth.getSession()
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+    ...init.headers
+  }
+  return fetch(url, { ...init, headers })
+}
+
+/** Báo admin: không xem được (xử lý tay). Cookie die → dùng Bảo hành. */
+export async function reportCannotViewToAdmin(subscriptionId) {
+  const r = await userApiFetch('/api/report-cannot-view', {
+    method: 'POST',
+    body: JSON.stringify({ subscriptionId })
+  })
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = { message: text }
+  }
+  if (!r.ok) throw new Error(j.message || j.error || 'Loi ' + r.status)
+  return j
+}
+
+export async function adminListViewerReports(status = 'open') {
+  const r = await adminApiFetch('/api/admin/viewer-reports?status=' + encodeURIComponent(status))
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = {}
+  }
+    if (!r.ok) throw new Error(j.message || j.error || 'Loi ' + r.status)
+  return j
+}
+
+export async function adminResolveViewerReport(reportId, { status = 'resolved', admin_note } = {}) {
+  const r = await adminApiFetch(`/api/admin/viewer-reports/${reportId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, admin_note: admin_note ?? undefined })
+  })
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = {}
+  }
+  if (!r.ok) throw new Error(j.message || j.error || 'Loi ' + r.status)
+  return j
+}
+
+/** Admin: assign pool account for viewer_report row (claim_warranty or body.resourceId). */
+export async function adminAssignViewerReportFromPool(reportId, body = {}) {
+  const r = await adminApiFetch(`/api/admin/viewer-reports/${reportId}/assign-from-pool`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = {}
+  }
+  if (!r.ok) throw new Error(j.message || j.error || 'Loi ' + r.status)
+  return j
+}
+
+/** User: rejected viewer_report notices (dashboard). */
+export async function getMyViewerReportNotices() {
+  const r = await userApiFetch('/api/viewer-report-notices')
+  const text = await r.text()
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = {}
+  }
+  if (!r.ok) throw new Error(j.message || j.error || 'Loi ' + r.status)
+  return j
+}
+
 // ==================== ADMIN: ACCOUNT INVENTORY (resources) ====================
 export async function adminGetAllAccounts(filter = {}) {
   let q = supabase.from('resources').select('*')

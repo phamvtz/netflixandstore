@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "lint": "eslint \"src/**/*.js\" server.cjs eslint.config.js",
     "server": "node server.cjs",
+    "migrate:viewer-reports": "node scripts/run-viewer-reports-migration.cjs",
     "start": "npm run build && node server.cjs"
   },
   "devDependencies": {

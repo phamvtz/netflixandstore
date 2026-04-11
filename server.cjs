@@ -438,6 +438,22 @@ function requireSellerOrAdmin(req, res, next) {
     .catch(() => res.status(401).json({ error: 'Unauthorized' }))
 }
 
+/** User đã đăng nhập (JWT Supabase) */
+function requireUser(req, res, next) {
+  const auth = req.headers.authorization || ''
+  const m = auth.match(/^Bearer\s+(\S+)/i)
+  if (!m) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Cần Bearer token (đăng nhập)' })
+  }
+  verifySupabaseAccessToken(m[1])
+    .then((u) => {
+      if (!u) return res.status(401).json({ error: 'Unauthorized' })
+      req.authUserId = u.userId
+      next()
+    })
+    .catch(() => res.status(401).json({ error: 'Unauthorized' }))
+}
+
 const SELLER_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,30}$/
 
 function normalizeSellerSlug(raw) {
@@ -1620,6 +1636,311 @@ app.get('/api/payment-status/:transferContent', async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ confirmed: false, error: err.message })
+  }
+})
+
+/** Khách báo không xem được — lưu DB + Telegram admin (xử lý tay). Cookie die → dùng Bảo hành / claim_warranty. */
+app.post('/api/report-cannot-view', requireUser, async (req, res) => {
+  const subscriptionId = req.body?.subscriptionId
+  if (!subscriptionId) {
+    return res.status(400).json({ success: false, message: 'Thiếu subscriptionId' })
+  }
+  const client = await dbPool.connect()
+  try {
+    const subR = await client.query(
+      `SELECT id, user_id, plan, status FROM subscriptions WHERE id = $1 LIMIT 1`,
+      [subscriptionId]
+    )
+    if (subR.rowCount === 0) {
+      return res.status(404).json({ success: false, message: 'Không tìm thấy đơn' })
+    }
+    const sub = subR.rows[0]
+    if (String(sub.user_id) !== String(req.authUserId)) {
+      return res.status(403).json({ success: false, message: 'Không phải đơn của bạn' })
+    }
+
+    const ins = await client.query(
+      `INSERT INTO viewer_reports (subscription_id, user_id, kind, status)
+       VALUES ($1, $2, 'cannot_view', 'open')
+       RETURNING id, created_at`,
+      [subscriptionId, req.authUserId]
+    )
+
+    sendTelegram(
+      `\u{1F6A8} <b>Báo không xem được</b> (admin xử lý tay)\n` +
+      `Đơn: <code>${subscriptionId}</code>\n` +
+      `Gói: ${sub.plan} · Trạng thái: ${sub.status}\n` +
+      `<i>Cookie die / mất gói → user dùng Bảo hành tự động.</i>`
+    )
+
+    res.json({ success: true, id: ins.rows[0].id, createdAt: ins.rows[0].created_at })
+  } catch (err) {
+    if (err.code === '42P01') {
+      return res.status(500).json({
+        success: false,
+        message: 'Chưa tạo bảng viewer_reports — chạy supabase/viewer_reports.sql trên database.'
+      })
+    }
+    console.error('[report-cannot-view]', err)
+    res.status(500).json({ success: false, message: err.message })
+  } finally {
+    client.release()
+  }
+})
+
+app.get('/api/admin/viewer-reports', requireAdmin, async (req, res) => {
+  const status = req.query.status
+  const client = await dbPool.connect()
+  try {
+    const r = await client.query(
+      `SELECT vr.id, vr.subscription_id, vr.user_id, vr.kind, vr.status, vr.created_at, vr.resolved_at, vr.admin_note,
+              p.email AS user_email,
+              s.plan AS sub_plan, s.status AS sub_status, s.end_at AS sub_end_at
+       FROM viewer_reports vr
+       LEFT JOIN profiles p ON p.id = vr.user_id
+       LEFT JOIN subscriptions s ON s.id = vr.subscription_id
+       WHERE ($1::text IS NULL OR $1 = '' OR $1 = 'all' OR vr.status = $1)
+       ORDER BY vr.created_at DESC
+       LIMIT 300`,
+      [status || 'open']
+    )
+    res.json({ reports: r.rows })
+  } catch (err) {
+    if (err.code === '42P01') {
+      return res.json({ reports: [], hint: 'Chạy supabase/viewer_reports.sql' })
+    }
+    console.error('[admin/viewer-reports]', err)
+    res.status(500).json({ error: err.message })
+  } finally {
+    client.release()
+  }
+})
+
+app.patch('/api/admin/viewer-reports/:id', requireAdmin, async (req, res) => {
+  const id = req.params.id
+  const { status, admin_note } = req.body || {}
+  if (!id) return res.status(400).json({ success: false, message: 'Thiếu id' })
+  if (status !== 'resolved' && status !== 'open' && status !== 'rejected') {
+    return res.status(400).json({ success: false, message: 'status phải là resolved, rejected hoặc open' })
+  }
+  if (status === 'rejected') {
+    const note = String(admin_note || '').trim()
+    if (!note) {
+      return res.status(400).json({ success: false, message: 'Tu choi can kem ghi chu gui khach (admin_note).' })
+    }
+  }
+  const client = await dbPool.connect()
+  try {
+    const noteParam =
+      status === 'rejected'
+        ? String(admin_note).trim()
+        : admin_note != null
+          ? String(admin_note)
+          : null
+    const resolvedAt = status === 'resolved' || status === 'rejected' ? new Date().toISOString() : null
+    const r = await client.query(
+      `UPDATE viewer_reports
+       SET status = $2,
+           admin_note = CASE
+             WHEN $2 = 'rejected' THEN $3::text
+             WHEN $3::text IS NOT NULL THEN $3::text
+             ELSE admin_note
+           END,
+           resolved_at = CASE WHEN $2 IN ('resolved', 'rejected') THEN COALESCE($4::timestamptz, now()) ELSE NULL END
+       WHERE id = $1
+       RETURNING id, status, resolved_at, admin_note, user_id, subscription_id`,
+      [id, status, noteParam, resolvedAt]
+    )
+    if (r.rowCount === 0) return res.status(404).json({ success: false, message: 'Không tìm thấy báo cáo' })
+    const row = r.rows[0]
+    if (status === 'rejected') {
+      const pr = await client.query(`SELECT email FROM profiles WHERE id = $1 LIMIT 1`, [row.user_id])
+      const to = pr.rows[0]?.email
+      const site = (await getSetting('site_name')) || 'Dịch vụ'
+      await sendEmail(
+        to,
+        `${site} — Phan hoi bao khong xem duoc`,
+        `<p>Xin chào,</p>
+         <p>Chúng tôi đã kiểm tra yêu cầu <strong>báo không xem được</strong> liên quan đơn của bạn.</p>
+         <p style="padding:12px 14px;background:#f4f4f5;border-radius:8px;border-left:4px solid #6366f1;">
+           ${String(row.admin_note || '')
+             .replace(/&/g, '&amp;')
+             .replace(/</g, '&lt;')
+             .replace(/>/g, '&gt;')
+             .replace(/\n/g, '<br>')}
+         </p>
+         <p>Neu ban van gap kho khan, vui long lien he ho tro.</p>`
+      )
+    }
+    res.json({ success: true, row })
+  } catch (err) {
+    console.error('[admin/viewer-reports patch]', err)
+    res.status(500).json({ success: false, message: err.message })
+  } finally {
+    client.release()
+  }
+})
+
+/** Admin: gan acc tu kho cho don (claim_warranty hoac body.resourceId). */
+app.post('/api/admin/viewer-reports/:id/assign-from-pool', requireAdmin, async (req, res) => {
+  const id = req.params.id
+  const resourceIdRaw = req.body?.resourceId
+  const adminNote = req.body?.admin_note != null ? String(req.body.admin_note) : null
+  if (!id) return res.status(400).json({ success: false, message: 'Thiếu id' })
+  const client = await dbPool.connect()
+  try {
+    await client.query('BEGIN')
+    const rep = await client.query(
+      `SELECT id, subscription_id, user_id, status FROM viewer_reports WHERE id = $1 FOR UPDATE`,
+      [id]
+    )
+    if (rep.rowCount === 0) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ success: false, message: 'Không tìm thấy báo cáo' })
+    }
+    const vr = rep.rows[0]
+    if (vr.status !== 'open') {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ success: false, message: 'Bao cao khong con o trang thai cho xu ly.' })
+    }
+    const subId = vr.subscription_id
+    const resourceId = resourceIdRaw && String(resourceIdRaw).trim() ? String(resourceIdRaw).trim() : null
+
+    if (resourceId) {
+      const subR = await client.query(
+        `SELECT id, user_id, status, login_link FROM subscriptions WHERE id = $1 FOR UPDATE`,
+        [subId]
+      )
+      if (subR.rowCount === 0) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ success: false, message: 'Không tìm thấy đơn' })
+      }
+      const sub = subR.rows[0]
+      if (sub.status !== 'active') {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ success: false, message: 'Don khong o trang thai active.' })
+      }
+      const resR = await client.query(
+        `SELECT id, value, status, assigned_count, COALESCE(max_slots, 5) AS max_slots
+         FROM resources WHERE id = $1 FOR UPDATE`,
+        [resourceId]
+      )
+      if (resR.rowCount === 0) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ success: false, message: 'Không tìm thấy tài khoản kho' })
+      }
+      const resRow = resR.rows[0]
+      if (resRow.status !== 'available') {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ success: false, message: 'Tài khoản kho không còn trạng thái available' })
+      }
+      const maxSlots = resRow.max_slots || 5
+      const used = resRow.assigned_count || 0
+      if (used >= maxSlots) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ success: false, message: 'Tài khoản kho đã hết slot' })
+      }
+      const dup = await client.query(
+        `SELECT 1 FROM subscriptions
+         WHERE user_id = $1 AND status = 'active' AND id != $2 AND login_link IS NOT NULL AND login_link = $3
+         LIMIT 1`,
+        [sub.user_id, subId, resRow.value]
+      )
+      if (dup.rowCount > 0) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({
+          success: false,
+          message: 'Khách đã có đơn active khác trùng tài khoản này — chọn acc khác.'
+        })
+      }
+      const newCount = used + 1
+      const newStatus = newCount >= maxSlots ? 'full' : 'available'
+      await client.query(
+        `UPDATE resources SET assigned_count = $1, status = $2, assigned_to = $3 WHERE id = $4`,
+        [newCount, newStatus, subId, resourceId]
+      )
+      await client.query(`UPDATE subscriptions SET login_link = $1, updated_at = NOW() WHERE id = $2`, [
+        resRow.value,
+        subId
+      ])
+    } else {
+      const w = await client.query(`SELECT claim_warranty($1::uuid) AS j`, [subId])
+      let j = w.rows[0]?.j
+      if (j && typeof j === 'string') {
+        try {
+          j = JSON.parse(j)
+        } catch {
+          j = { success: false, message: j }
+        }
+      }
+      if (!j || !j.success) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({
+          success: false,
+          message: (j && j.message) || 'Khong gan duoc tu kho (claim_warranty that bai)'
+        })
+      }
+    }
+
+    const resolvedAt = new Date().toISOString()
+    await client.query(
+      `UPDATE viewer_reports
+       SET status = 'resolved',
+           admin_note = COALESCE($2::text, admin_note),
+           resolved_at = COALESCE($3::timestamptz, now())
+       WHERE id = $1`,
+      [id, adminNote, resolvedAt]
+    )
+    await client.query('COMMIT')
+
+    sendTelegram(
+      `\u2705 <b>Admin da gan acc tu kho</b> (bao khong xem)\n` +
+        `Bao cao: <code>${id}</code>\nDon: <code>${subId}</code>`
+    )
+    res.json({ success: true, message: 'Da gan tai khoan tu kho va danh dau bao cao da xu ly.' })
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK')
+    } catch {
+      /* ignore */
+    }
+    if (err.code === '42883') {
+      return res.status(500).json({
+        success: false,
+        message: 'Thiếu hàm claim_warranty trên database — chạy supabase_functions.sql (hoặc buyer_schema).'
+      })
+    }
+    console.error('[admin/viewer-reports assign-from-pool]', err)
+    res.status(500).json({ success: false, message: err.message })
+  } finally {
+    client.release()
+  }
+})
+
+/** User: latest rejected viewer_report note per subscription (dashboard). */
+app.get('/api/viewer-report-notices', requireUser, async (req, res) => {
+  const client = await dbPool.connect()
+  try {
+    const r = await client.query(
+      `SELECT DISTINCT ON (subscription_id)
+         id, subscription_id, admin_note, resolved_at
+       FROM viewer_reports
+       WHERE user_id = $1
+         AND status = 'rejected'
+         AND admin_note IS NOT NULL
+         AND trim(admin_note) <> ''
+       ORDER BY subscription_id, resolved_at DESC NULLS LAST`,
+      [req.authUserId]
+    )
+    res.json({ notices: r.rows })
+  } catch (err) {
+    if (err.code === '42P01') {
+      return res.json({ notices: [] })
+    }
+    console.error('[viewer-report-notices]', err)
+    res.status(500).json({ error: err.message })
+  } finally {
+    client.release()
   }
 })
 

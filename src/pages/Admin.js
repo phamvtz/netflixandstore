@@ -32,7 +32,8 @@ import {
   adminCreatePlan, adminUpdatePlan, adminDeletePlan,
   adminGetSettings, adminPatchSettings,
   adminConfirmPayment,
-  adminConfirmServiceOrder, adminDeliverFromStock, adminGetAvailableStock
+  adminConfirmServiceOrder, adminDeliverFromStock, adminGetAvailableStock,
+  adminListViewerReports, adminResolveViewerReport, adminAssignViewerReportFromPool
 } from '../utils/api.js'
 import { formatVND, formatDate, statusLabel, statusClass, planLabel, daysLeft } from '../utils/format.js'
 import { SERVICES } from '../utils/services.js'
@@ -78,6 +79,7 @@ const ADMIN_GROUPS = [
     label: 'Netflix',
     items: [
       { tab:'orders',   label:'Đơn hàng',     icon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>' },
+      { tab:'viewer-reports', label:'Báo không xem', icon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>' },
       { tab:'payments', label:'Thanh toán',    icon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>' },
       { tab:'accounts', label:'Kho tài khoản', icon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>' },
     ]
@@ -194,6 +196,9 @@ export async function renderAdmin(container) {
             <div class="admin-panel admin-panel-surface" id="adminOrders">
               <div class="loading"><div class="spinner"></div></div>
             </div>
+            <div class="admin-panel admin-panel-surface" id="adminViewerReports">
+              <div class="loading"><div class="spinner"></div></div>
+            </div>
             <div class="admin-panel admin-panel-surface" id="adminPayments">
               <div class="loading"><div class="spinner"></div></div>
             </div>
@@ -227,6 +232,7 @@ export async function renderAdmin(container) {
   const panels = {
     stats:    container.querySelector('#adminStats'),
     orders:   container.querySelector('#adminOrders'),
+    'viewer-reports': container.querySelector('#adminViewerReports'),
     payments: container.querySelector('#adminPayments'),
     accounts: container.querySelector('#adminAccounts'),
     users:    container.querySelector('#adminUsers'),
@@ -235,7 +241,7 @@ export async function renderAdmin(container) {
     guides:   container.querySelector('#adminGuides'),
     settings: container.querySelector('#adminSettings'),
   }
-  const loaded = { stats: false, orders: false, payments: false, accounts: false, users: false, plans: false, products: false, guides: false, settings: false }
+  const loaded = { stats: false, orders: false, 'viewer-reports': false, payments: false, accounts: false, users: false, plans: false, products: false, guides: false, settings: false }
 
   function onAdminRetryClick(e) {
     const btn = e.target.closest('[data-admin-retry-tab]')
@@ -253,6 +259,7 @@ export async function renderAdmin(container) {
     try {
       if (name === 'stats')    { await renderStats(panels.stats) }
       if (name === 'orders')   { const d = await adminGetAllSubscriptions(); renderOrders(panels.orders, d) }
+      if (name === 'viewer-reports') { await renderViewerReports(panels['viewer-reports']) }
       if (name === 'payments') { const d = await adminGetAllPayments();       renderAdminPayments(panels.payments, d) }
       if (name === 'accounts') { const d = await adminGetAllAccounts();       renderAccounts(panels.accounts, d) }
       if (name === 'users')    { const d = await adminGetAllProfiles();       renderUsers(panels.users, d) }
@@ -495,6 +502,183 @@ function invRow(label, value, tone) {
       <span class="admin-inventory-row__label">${label}</span>
       <strong class="${toneClass}">${value}</strong>
     </div>`
+}
+
+/** Bao khong xem duoc: gan acc kho hoac tu choi + ghi chu cho user. */
+async function renderViewerReports(panel) {
+  let filter = 'open'
+  async function paint() {
+    panel.innerHTML = '<div class="loading"><div class="spinner"></div></div>'
+    try {
+      const data = await adminListViewerReports(filter)
+      const reports = data.reports || []
+      const hint = data.hint
+      const rows = reports.length === 0
+        ? '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px;">Không có báo cáo nào.</td></tr>'
+        : reports.map(r => {
+            const st =
+              r.status === 'resolved'
+                ? '<span class="status-badge status-active">Da doi acc / xong</span>'
+                : r.status === 'rejected'
+                  ? '<span class="status-badge status-expired">Da tu choi</span>'
+                  : '<span class="status-badge status-active">Cho xu ly</span>'
+            const when = r.created_at ? formatDate(r.created_at) : '—'
+            const subSt = r.sub_status ? statusLabel(r.sub_status) : '—'
+            const actions =
+              r.status === 'open'
+                ? `<div style="display:flex;flex-wrap:wrap;gap:6px;">
+                    <button type="button" class="btn btn-sm btn-primary vr-assign-btn" data-id="${escapeAttr(r.id)}"
+                      title="Gan tu kho — de trong = claim_warranty">Xác nhận · gán kho</button>
+                    <button type="button" class="btn btn-sm btn-outline vr-reject-btn" data-id="${escapeAttr(r.id)}"
+                      title="Khach van xem duoc — gui ly do">Tu chối (có lý do)</button>
+                  </div>`
+                : `<button type="button" class="btn btn-sm btn-outline vr-reopen-btn" data-id="${escapeAttr(r.id)}">Mo lai</button>`
+            return `<tr data-vr-id="${escapeAttr(r.id)}">
+              <td>${escapeHtml(when)}</td>
+              <td><code style="font-size:11px;">${escapeHtml(r.user_email || r.user_id || '—')}</code></td>
+              <td><code style="font-size:11px;">${escapeHtml(String(r.subscription_id || '').slice(0, 8))}…</code></td>
+              <td>${escapeHtml(r.sub_plan || '—')}</td>
+              <td>${escapeHtml(subSt)}</td>
+              <td>${st}</td>
+              <td style="max-width:220px;font-size:12px;">${escapeHtml(r.admin_note || '—')}</td>
+              <td>${actions}</td>
+            </tr>`
+          }).join('')
+
+      panel.innerHTML = `
+        <div style="padding:8px 4px 20px;">
+          <h3 class="admin-section-title" style="margin-bottom:8px;">Báo không xem được</h3>
+          <p style="font-size:13px;color:var(--text-muted);max-width:820px;line-height:1.55;margin:0 0 16px;">
+            Khach bam <strong>Bao loi — khong xem duoc</strong> khi can admin kiem tra tay.
+            Nut <strong>Xac nhan doi · gan kho</strong> = gan acc tu kho (claim_warranty). Nut <strong>Tu choi (co ly do)</strong> = ghi chu hien tren dashboard + email.
+            Bao hanh / claim_warranty tu dong khi cookie die — khac voi bao nay.
+            ${hint ? `<br><strong>Goi y:</strong> ${escapeHtml(hint)}` : ''}
+          </p>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+            <label style="font-size:13px;font-weight:600;">Trạng thái</label>
+            <select id="vrFilter" class="admin-select-like" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);">
+              <option value="open">Đang chờ xử lý</option>
+              <option value="resolved">Da doi acc / xong</option>
+              <option value="rejected">Da tu choi</option>
+              <option value="all">Tất cả</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-outline" id="vrReload">Tải lại</button>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead><tr>
+                <th>Thời gian</th><th>Email KH</th><th>Đơn (id)</th><th>Gói</th><th>TT đơn</th><th>TT báo</th><th>Ghi chú</th><th></th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          <div class="user-modal-overlay" id="vrRejectOverlay" style="display:none;">
+            <div class="user-modal" style="max-width:440px;">
+              <div class="user-modal-header">
+                <h3>Tu choi — bao khong xem duoc</h3>
+                <button type="button" class="user-modal-close vr-reject-close" aria-label="Đóng">×</button>
+              </div>
+              <div class="user-modal-body">
+                <p style="font-size:13px;color:var(--text-muted);margin:0 0 10px;">Ly do gui khach (dashboard + email neu co Gmail).</p>
+                <textarea id="vrRejectNote" rows="5" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);font-family:inherit;font-size:13px;" placeholder="Vi du: Da kiem tra, tai khoan con Premium…"></textarea>
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+                  <button type="button" class="btn btn-outline vr-reject-close">Huy</button>
+                  <button type="button" class="btn btn-primary" id="vrRejectSubmit">Gui tu choi</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>`
+
+      const sel = panel.querySelector('#vrFilter')
+      if (sel) {
+        sel.value = filter
+        sel.addEventListener('change', () => {
+          filter = sel.value
+          void paint()
+        })
+      }
+      panel.querySelector('#vrReload')?.addEventListener('click', () => { void paint() })
+
+      const overlay = panel.querySelector('#vrRejectOverlay')
+      const noteEl = panel.querySelector('#vrRejectNote')
+      let rejectReportId = null
+
+      function closeReject() {
+        if (overlay) overlay.style.display = 'none'
+        rejectReportId = null
+        if (noteEl) noteEl.value = ''
+      }
+
+      panel.querySelectorAll('.vr-reject-close').forEach(b => b.addEventListener('click', closeReject))
+      overlay?.addEventListener('click', (e) => { if (e.target === overlay) closeReject() })
+
+      panel.querySelector('#vrRejectSubmit')?.addEventListener('click', async () => {
+        const id = rejectReportId
+        const note = (noteEl?.value || '').trim()
+        if (!id) return
+        if (!note) {
+          alert('Vui lòng nhập ghi chú gửi khách.')
+          return
+        }
+        const submitBtn = panel.querySelector('#vrRejectSubmit')
+        if (submitBtn) submitBtn.disabled = true
+        try {
+          await adminResolveViewerReport(id, { status: 'rejected', admin_note: note })
+          closeReject()
+          await paint()
+        } catch (e) {
+          alert(e.message)
+        } finally {
+          if (submitBtn) submitBtn.disabled = false
+        }
+      })
+
+      panel.querySelectorAll('.vr-reject-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          rejectReportId = btn.dataset.id
+          if (noteEl) noteEl.value = ''
+          if (overlay) overlay.style.display = 'flex'
+        })
+      })
+
+      panel.querySelectorAll('.vr-assign-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const rid = window.prompt(
+            'UUID dòng kho (bảng resources) — để trống = tự động như Bảo hành (claim_warranty):',
+            ''
+          )
+          if (rid === null) return
+          const resourceId = String(rid).trim() || undefined
+          if (!confirm('Xac nhan doi tai khoan tu kho va dong bao cao?')) return
+          btn.disabled = true
+          try {
+            await adminAssignViewerReportFromPool(btn.dataset.id, { resourceId })
+            await paint()
+          } catch (e) {
+            alert(e.message)
+            btn.disabled = false
+          }
+        })
+      })
+
+      panel.querySelectorAll('.vr-reopen-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true
+          try {
+            await adminResolveViewerReport(btn.dataset.id, { status: 'open' })
+            await paint()
+          } catch (e) {
+            alert(e.message)
+            btn.disabled = false
+          }
+        })
+      })
+    } catch (err) {
+      panel.innerHTML = `<div class="admin-empty"><p class="error-text">${escapeHtml(err.message)}</p></div>`
+    }
+  }
+  await paint()
 }
 
 function renderOrders(panel, subs) {

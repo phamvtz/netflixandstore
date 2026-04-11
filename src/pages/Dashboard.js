@@ -1,5 +1,8 @@
 import { getUser } from '../utils/auth.js'
-import { getUserSubscriptions, getUserPayments, getPlans, claimWarranty } from '../utils/api.js'
+import {
+  getUserSubscriptions, getUserPayments, getPlans, claimWarranty, reportCannotViewToAdmin,
+  getMyViewerReportNotices
+} from '../utils/api.js'
 import { apiGetLink, apiCheckPlanStatus, apiTvInit, apiTvSubmit } from '../utils/netflix.js'
 import {
   formatVND, formatDate, statusLabel, statusClass,
@@ -20,6 +23,22 @@ const RENEW_PLAN_ORDER = [
   { id: 'half_year', label: '6 tháng' },
   { id: 'year', label: '1 năm' }
 ]
+
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+async function fetchViewerNoticesBySubId() {
+  try {
+    const j = await getMyViewerReportNotices()
+    return new Map((j.notices || []).map((n) => [n.subscription_id, n]))
+  } catch {
+    return new Map()
+  }
+}
 
 function buildRenewOptionsHtml(plansList) {
   const byId = new Map((plansList || []).map(p => [p.id, p]))
@@ -108,12 +127,13 @@ export async function renderDashboard(container) {
   }
 
   try {
-    const [subs, payments, renewPlans] = await Promise.all([
+    const [subs, payments, renewPlans, noticesMap] = await Promise.all([
       getUserSubscriptions(user.id),
       getUserPayments(user.id),
-      getPlans().catch(() => [])
+      getPlans().catch(() => []),
+      fetchViewerNoticesBySubId()
     ])
-    renderSubscriptions(panelSubs, subs, renewPlans)
+    renderSubscriptions(panelSubs, subs, renewPlans, noticesMap)
     renderPayments(panelPayments, payments)
 
     // ── Countdown timer cho đơn pending ──────────────────────
@@ -144,7 +164,8 @@ export async function renderDashboard(container) {
             return updated && updated.status === 'cancelled'
           })
           if (wasCancelled) {
-            renderSubscriptions(panelSubs, fresh, renewPlans)
+            const nm = await fetchViewerNoticesBySubId()
+            renderSubscriptions(panelSubs, fresh, renewPlans, nm)
             clearInterval(pendingPollTimer); pendingPollTimer = null
             clearInterval(countdownTimer);   countdownTimer   = null
           }
@@ -167,7 +188,8 @@ export async function renderDashboard(container) {
         if (row?.login_link) gained = true
       }
       if (gained) {
-        renderSubscriptions(panelSubs, newSubs, renewPlans)
+        const nm = await fetchViewerNoticesBySubId()
+        renderSubscriptions(panelSubs, newSubs, renewPlans, nm)
         pendingIds = new Set(
           newSubs.filter(s => s.status === 'active' && !s.login_link && !subscriptionAccessExpired(s)).map(s => s.id)
         )
@@ -188,7 +210,7 @@ export async function renderDashboard(container) {
   return stopPoller
 }
 
-function renderSubscriptions(panel, subs, renewPlans = []) {
+function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new Map()) {
   const renewGridHtml = buildRenewOptionsHtml(renewPlans)
 
   if (!subs || subs.length === 0) {
@@ -203,6 +225,8 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
   }
 
   let html = '<div class="sub-list">'
+  /** Kết quả /api/check-plan-status theo subscription — dùng chặn Get Link / TV khi cần bảo hành */
+  const planCheckBySub = new Map()
 
   subs.forEach(sub => {
     const days = daysLeft(sub.end_at)
@@ -219,6 +243,7 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
     const hasAccount = isNetflix && isActive && sub.login_link && !expired
     const acc = hasAccount ? parseAccount(sub.login_link) : null
     const cookie = acc ? (acc.cookie || '') : ''
+    const vrRejected = noticesBySubId.get(sub.id)
 
     // Non-Netflix: nội dung giao trong login_link
     const deliveredContent = !isNetflix && sub.login_link ? sub.login_link : null
@@ -301,6 +326,12 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
           📅 Gói đang hiệu lực đến <strong>${formatDate(sub.end_at)}</strong>${days !== null ? ` · còn <strong>${days}</strong> ngày` : ''}.
           Các nút <strong>Get link</strong>, <strong>TV</strong>, <strong>Bảo hành</strong> dùng được trong thời gian này.
         </div>` : ''}
+        ${vrRejected ? `
+        <div class="viewer-report-user-notice" role="status">
+          <strong>Phan hoi shop (bao khong xem duoc)</strong>
+          <p class="viewer-report-user-notice__text">${escHtml(vrRejected.admin_note)}</p>
+          ${vrRejected.resolved_at ? `<p class="viewer-report-user-notice__meta">${formatDate(vrRejected.resolved_at)}</p>` : ''}
+        </div>` : ''}
         <div class="account-info-box">
           ${acc.email ? `
           <div class="acc-info-row">
@@ -336,8 +367,15 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
           </button>
           <button class="btn btn-sm btn-warning acc-warranty-btn"
             data-sub="${sub.id}"
-            data-cookie="${encodeURIComponent(cookie)}">
+            data-cookie="${encodeURIComponent(cookie)}"
+            title="Cookie die hoặc mất Premium — hệ thống tự động đổi tài khoản (Bảo hành / claim_warranty)">
             🔧 Bảo hành
+          </button>
+          <button type="button" class="btn btn-sm btn-outline acc-report-view-btn"
+            data-sub="${sub.id}"
+            data-cookie="${encodeURIComponent(cookie)}"
+            title="Vẫn không xem được dù tài khoản OK — gửi admin kiểm tra tay. Cookie die / mất gói → Bảo hành.">
+            🚨 Báo lỗi — không xem được
           </button>
         </div>
 
@@ -446,6 +484,24 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
         return
       }
 
+      const stLink = planCheckBySub.get(subId)
+      if (stLink && stLink.alive === false) {
+        showResult(
+          resultEl,
+          'error',
+          '❌ <strong>Không thể xem / lấy link đăng nhập:</strong> cookie Netflix đã hết hiệu lực. Bấm <strong>Bảo hành</strong> để hệ thống đổi tài khoản mới.'
+        )
+        return
+      }
+      if (stLink && stLink.hasPremium === false) {
+        showResult(
+          resultEl,
+          'error',
+          '❌ <strong>Không thể xem / lấy link đăng nhập:</strong> tài khoản không còn gói Premium trên Netflix. Bấm <strong>Bảo hành</strong> để đổi slot.'
+        )
+        return
+      }
+
       showResult(resultEl, 'loading', '⏳ Đang lấy login link...')
       btn.disabled = true
 
@@ -480,7 +536,9 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
       } catch (err) {
         showResult(resultEl, 'error', `❌ Lỗi kết nối: ${err.message}`)
       } finally {
-        btn.disabled = false
+        const st = planCheckBySub.get(subId)
+        const stillBlocked = st && (st.alive === false || st.hasPremium === false)
+        btn.disabled = !!stillBlocked
       }
     })
   })
@@ -519,6 +577,28 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
         return
       }
 
+      const stTv = planCheckBySub.get(subId)
+      if (stTv && stTv.alive === false) {
+        tvBox.style.display = 'block'
+        clearTvSession(subId)
+        showResult(
+          resultEl,
+          'error',
+          '❌ <strong>Không thể đăng nhập TV:</strong> cookie đã hết hiệu lực. Bấm <strong>Bảo hành</strong> trước.'
+        )
+        return
+      }
+      if (stTv && stTv.hasPremium === false) {
+        tvBox.style.display = 'block'
+        clearTvSession(subId)
+        showResult(
+          resultEl,
+          'error',
+          '❌ <strong>Không thể đăng nhập TV:</strong> tài khoản không còn gói Premium. Bấm <strong>Bảo hành</strong> trước.'
+        )
+        return
+      }
+
       tvBox.style.display = 'block'
       clearTvSession(subId)
       btn.disabled = true
@@ -545,7 +625,9 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
       } catch (err) {
         showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
       } finally {
-        btn.disabled = false
+        const st = planCheckBySub.get(subId)
+        const stillBlocked = st && (st.alive === false || st.hasPremium === false)
+        btn.disabled = !!stillBlocked
         btn.textContent = '📺 Nhập mã TV'
       }
     })
@@ -649,6 +731,25 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
             </div>`
         }
 
+        planCheckBySub.set(subId, { alive: !!check.alive, hasPremium: !!check.hasPremium })
+        const needWarranty = !check.alive || !check.hasPremium
+        const getLinkBtn = panel.querySelector(`.acc-get-link-btn[data-sub="${subId}"]`)
+        const tvBtnEl = panel.querySelector(`.acc-tv-btn[data-sub="${subId}"]`)
+        for (const b of [getLinkBtn, tvBtnEl]) {
+          if (!b) continue
+          b.disabled = needWarranty
+          b.setAttribute('aria-disabled', needWarranty ? 'true' : 'false')
+          if (needWarranty) {
+            b.title = !check.alive
+              ? 'Cookie hết hiệu lực — bấm Bảo hành để đổi tài khoản trước khi lấy link / TV.'
+              : 'Tài khoản mất gói Premium — bấm Bảo hành để đổi tài khoản trước khi lấy link / TV.'
+            b.classList.add('acc-action-needs-warranty')
+          } else {
+            b.removeAttribute('title')
+            b.classList.remove('acc-action-needs-warranty')
+          }
+        }
+
         // Bind inline warranty buttons
         planStatusEl.querySelectorAll('.acc-warranty-btn-inline').forEach(b => {
           b.addEventListener('click', () => triggerWarranty(b.dataset.sub, decodeURIComponent(b.dataset.cookie), panel, renewPlans))
@@ -659,56 +760,72 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
     }, 1200)
   })
 
-  // ===== WARRANTY TRIGGER =====
+  async function submitViewerReport(subId, panel) {
+    const resultEl = panel.querySelector(`#result-warranty-${subId}`)
+    const reportBtn = panel.querySelector(`.acc-report-view-btn[data-sub="${subId}"]`)
+    if (reportBtn) reportBtn.disabled = true
+    try {
+      showResult(resultEl, 'loading', '\u23f3 \u0110ang g\u1eedi b\u00e1o t\u1edbi admin...')
+      await reportCannotViewToAdmin(subId)
+      showResult(
+        resultEl,
+        'success',
+        '\u2705 \u0110\u00e3 g\u1eedi b\u00e1o cho admin. Admin s\u1ebd ki\u1ec3m tra th\u1ee7 c\u00f4ng v\u00e0 c\u00f3 th\u1ec3 g\u00e1n t\u00e0i kho\u1ea3n kh\u00e1c n\u1ebfu c\u1ea7n.<br><small>N\u1ebfu <strong>cookie die</strong> ho\u1eb7c <strong>m\u1ea5t Premium</strong>, d\u00f9ng <strong>B\u1ea3o h\u00e0nh</strong> \u0111\u1ec3 h\u1ec7 th\u1ed1ng t\u1ef1 \u0111\u1ed5i.</small>'
+      )
+    } catch (err) {
+      showResult(resultEl, 'error', `\u274c ${err.message}`)
+    } finally {
+      if (reportBtn) reportBtn.disabled = false
+    }
+  }
+
+  // ===== Bảo hành: cookie die / mất gói → claim_warranty tự động =====
   async function triggerWarranty(subId, cookie, panel, renewPlans) {
     const resultEl = panel.querySelector(`#result-warranty-${subId}`)
-    const btn      = panel.querySelector(`.acc-warranty-btn[data-sub="${subId}"]`)
-    if (btn) btn.disabled = true
+    const warrantyBtn = panel.querySelector(`.acc-warranty-btn[data-sub="${subId}"]`)
+    if (warrantyBtn) warrantyBtn.disabled = true
 
     try {
-      // Kiểm tra chi tiết trước
       let reason = 'unknown'
 
       if (cookie) {
-        showResult(resultEl, 'loading', '⏳ Đang kiểm tra tình trạng tài khoản...')
+        showResult(resultEl, 'loading', '\u23f3 \u0110ang ki\u1ec3m tra t\u00ecnh tr\u1ea1ng t\u00e0i kho\u1ea3n...')
         try {
           const check = await apiCheckPlanStatus(cookie)
           if (check.alive && check.hasPremium) {
-            showResult(resultEl, 'success', `✅ Tài khoản OK — gói ${check.plan || 'Premium'} đang hoạt động bình thường.`)
-            if (btn) btn.disabled = false
+            showResult(resultEl, 'success', `\u2705 T\u00e0i kho\u1ea3n OK \u2014 g\u00f3i ${check.plan || 'Premium'} \u0111ang ho\u1ea1t \u0111\u1ed9ng b\u00ecnh th\u01b0\u1eddng.`)
+            if (warrantyBtn) warrantyBtn.disabled = false
             return
           }
           reason = check.reason || (!check.alive ? 'cookie_dead' : 'plan_lost')
         } catch {
-          // Nếu check lỗi → tiến hành bảo hành luôn
         }
 
         const reasonMsg = reason === 'plan_lost'
-          ? '⏳ Phát hiện mất gói Premium. Đang đổi tài khoản mới...'
-          : '⏳ Cookie đã die. Đang xử lý bảo hành...'
+          ? '\u23f3 Ph\u00e1t hi\u1ec7n m\u1ea5t g\u00f3i Premium. \u0110ang \u0111\u1ed5i t\u00e0i kho\u1ea3n m\u1edbi...'
+          : '\u23f3 Cookie \u0111\u00e3 die. \u0110ang x\u1eed l\u00fd b\u1ea3o h\u00e0nh...'
         showResult(resultEl, 'loading', reasonMsg)
       } else {
-        showResult(resultEl, 'loading', '⏳ Đang xử lý bảo hành...')
+        showResult(resultEl, 'loading', '\u23f3 \u0110ang x\u1eed l\u00fd b\u1ea3o h\u00e0nh...')
       }
 
-      // Claim warranty từ Supabase RPC
       const warranty = await claimWarranty(subId)
 
       if (warranty && warranty.success) {
         const u = getUser()
         if (u) {
-          const fresh = await getUserSubscriptions(u.id)
-          renderSubscriptions(panel, fresh, renewPlans)
+          const [fresh, nm] = await Promise.all([getUserSubscriptions(u.id), fetchViewerNoticesBySubId()])
+          renderSubscriptions(panel, fresh, renewPlans, nm)
         } else {
-          showResult(resultEl, 'success', '✅ Đã đổi tài khoản. Vui lòng tải lại trang.')
+          showResult(resultEl, 'success', '\u2705 \u0110\u00e3 \u0111\u1ed5i t\u00e0i kho\u1ea3n. Vui l\u00f2ng t\u1ea3i l\u1ea1i trang.')
         }
       } else {
-        showResult(resultEl, 'error', `❌ ${warranty?.message || 'Không thể bảo hành. Vui lòng liên hệ admin.'}`)
+        showResult(resultEl, 'error', `\u274c ${warranty?.message || 'Kh\u00f4ng th\u1ec3 b\u1ea3o h\u00e0nh. Vui l\u00f2ng li\u00ean h\u1ec7 admin.'}`)
       }
     } catch (err) {
-      showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
+      showResult(resultEl, 'error', `\u274c L\u1ed7i: ${err.message}`)
     } finally {
-      if (btn) btn.disabled = false
+      if (warrantyBtn) warrantyBtn.disabled = false
     }
   }
 
@@ -716,6 +833,12 @@ function renderSubscriptions(panel, subs, renewPlans = []) {
   panel.querySelectorAll('.acc-warranty-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       triggerWarranty(btn.dataset.sub, decodeURIComponent(btn.dataset.cookie), panel, renewPlans)
+    })
+  })
+
+  panel.querySelectorAll('.acc-report-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      submitViewerReport(btn.dataset.sub, panel)
     })
   })
 }
