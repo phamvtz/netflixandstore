@@ -12,9 +12,21 @@ const NI = {
   admin: '<svg class="nav-drawer-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>',
 }
 
+/** Drawer + backdrop ngoài #navbar: backdrop-filter trên navbar tạo containing block khiến position:fixed của drawer bị giới hạn ~chiều cao thanh bar → menu mobile không hiện. */
+function getNavDrawerHost() {
+  let el = document.getElementById('navDrawerHost')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'navDrawerHost'
+    document.body.appendChild(el)
+  }
+  return el
+}
+
 export function renderNavbar() {
   const nav = document.getElementById('navbar')
   if (!nav) return
+  const drawerHost = getNavDrawerHost()
 
   if (!nav.dataset.servicesDdInit) {
     nav.dataset.servicesDdInit = '1'
@@ -46,9 +58,9 @@ export function renderNavbar() {
       const trigger = nav.querySelector('#navDdTrigger')
       menu?.classList.remove('nav-dd-menu--open')
       trigger?.setAttribute('aria-expanded', 'false')
-      const drawer = nav.querySelector('#navDrawer')
-      const toggleBtn = nav.querySelector('#navToggle')
-      const backdropEl = nav.querySelector('#navDrawerBackdrop')
+      const drawer = document.getElementById('navDrawer')
+      const toggleBtn = document.getElementById('navToggle')
+      const backdropEl = document.getElementById('navDrawerBackdrop')
       if (drawer?.classList.contains('open')) {
         drawer.classList.remove('open')
         backdropEl?.classList.remove('open')
@@ -134,7 +146,9 @@ export function renderNavbar() {
           <span></span><span></span><span></span>
         </button>
       </div>
+    `
 
+    drawerHost.innerHTML = `
       <div class="nav-drawer-backdrop" id="navDrawerBackdrop" aria-hidden="true"></div>
       <div class="nav-drawer" id="navDrawer" role="dialog" aria-modal="true" aria-label="Menu điều hướng">
         <div class="nav-drawer-header">

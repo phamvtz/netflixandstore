@@ -22,6 +22,8 @@
     "vite": "^8.0.1"
   },
   "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/plus-jakarta-sans": "^5.2.8",
     "@supabase/supabase-js": "^2.100.1",
     "axios": "^1.13.6",
     "dotenv": "^17.3.1",

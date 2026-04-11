@@ -92,8 +92,18 @@ export async function renderPayment(container, params) {
       const checkData = await check.json()
       if (checkData.confirmed) {
         sessionStorage.removeItem(SESSION_KEY)
-        showWaitingUI(container, plan, planId, savedSession.transferContent, SESSION_KEY,
-          { bankName, bankAccount, bankOwner, vietqrBin })
+        showWaitingUI(container, plan, planId, savedSession.transferContent, SESSION_KEY, {
+          bankName,
+          bankAccount,
+          bankOwner,
+          vietqrBin,
+          momoNumber,
+          momoName,
+          orderCode: savedSession.orderCode || '',
+          storeSlug: checkoutStore?.slug || '',
+          paymentSource: paymentCfg.source || 'site',
+          sellerStoreId
+        })
         return
       }
       // still pending — keep using the same transferContent / QR
@@ -105,13 +115,13 @@ export async function renderPayment(container, params) {
   const transferContent = savedSession?.transferContent ?? generateTransferContent()
 
   // ── Create DB records IMMEDIATELY so the SePay webhook can match them ───────
-  // BUG FIX: previously the subscription + payment rows were created only when
-  // the user clicked "Tôi đã chuyển khoản".  If the user went to the banking
+  // BUG FIX: previously the subscription + payment rows were created only after
+  // a manual step. If the user went to the banking
   // app first, the webhook fired while no DB record existed → silently discarded
   // → payment forever stuck at "pending".
   //
   // We create the records NOW (on page load) and persist them in sessionStorage.
-  // The confirm button becomes a simple "show waiting UI" action.
+  // Trang tự poll SePay — không cần nút xác nhận.
   if (!savedSession) {
     try {
       container.innerHTML = `
@@ -133,112 +143,17 @@ export async function renderPayment(container, params) {
     }
   }
 
-  container.innerHTML = `
-    <section class="payment-section">
-      <div class="page-container">
-        <h1 class="page-title">Thanh toán</h1>
-
-        <div class="payment-grid">
-          <!-- ORDER SUMMARY -->
-          <div class="payment-card order-summary">
-            <h2>📦 Đơn hàng</h2>
-            ${savedSession?.orderCode ? `
-            <div class="order-detail" style="border-bottom:2px solid var(--primary-ring);padding-bottom:10px;margin-bottom:2px;">
-              <span>Mã đơn:</span>
-              <strong style="font-family:var(--mono);font-size:15px;color:var(--primary);letter-spacing:.08em;">#${savedSession.orderCode}</strong>
-            </div>` : ''}
-            <div class="order-detail">
-              <span>Gói:</span>
-              <strong>${plan.name || planLabel(plan.id)}</strong>
-            </div>
-            <div class="order-detail">
-              <span>Thời hạn:</span>
-              <strong>${plan.duration_days} ngày</strong>
-            </div>
-            <div class="order-detail total">
-              <span>Tổng tiền:</span>
-              <strong class="price-highlight">${formatVND(plan.price)}</strong>
-            </div>
-            ${sellerStoreId && checkoutStore?.slug
-              ? `<div class="order-detail" style="font-size:13px;"><span>Gian hàng:</span><strong>#/s/${checkoutStore.slug}</strong>${paymentCfg.source === 'seller' ? ' • Thanh toán về TK đại lý' : ''}</div>`
-              : ''}
-            <div class="order-detail transfer-code-box">
-              <span>Nội dung CK:</span>
-              <strong class="transfer-code">${transferContent}</strong>
-            </div>
-          </div>
-
-          <!-- PAYMENT METHODS -->
-          <div class="payment-card payment-methods">
-            <h2>🏦 Thông tin chuyển khoản</h2>
-
-            <!-- BANK INFO -->
-            <div class="bank-info">
-              <div class="bank-row">
-                <span>Ngân hàng:</span>
-                <strong>${bankName}</strong>
-              </div>
-              <div class="bank-row">
-                <span>Số tài khoản:</span>
-                <strong class="copyable" id="bankAccount">${bankAccount}</strong>
-                <button class="btn-copy" data-copy="${bankAccount}">📋</button>
-              </div>
-              <div class="bank-row">
-                <span>Chủ tài khoản:</span>
-                <strong>${bankOwner}</strong>
-              </div>
-              <div class="bank-row">
-                <span>Số tiền:</span>
-                <strong class="copyable">${formatVND(plan.price)}</strong>
-                <button class="btn-copy" data-copy="${plan.price}">📋</button>
-              </div>
-              <div class="bank-row highlight">
-                <span>Nội dung CK:</span>
-                <strong class="copyable" id="transferCode">${transferContent}</strong>
-                <button class="btn-copy" data-copy="${transferContent}">📋</button>
-              </div>
-            </div>
-            <div class="bank-qr">
-              <img src="https://img.vietqr.io/image/${vietqrBin}-${bankAccount}-compact.jpg?amount=${plan.price}&addInfo=${encodeURIComponent(transferContent)}&accountName=${encodeURIComponent(bankOwner)}"
-                   alt="QR Code" class="qr-img" onerror="this.style.display='none'">
-              <p class="qr-note">Quét mã QR để chuyển khoản nhanh</p>
-            </div>
-            ${momoNumber
-              ? `<div class="bank-info" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
-                   <h3 style="margin:0 0 10px;font-size:16px;">📱 MoMo</h3>
-                   <div class="bank-row"><span>Số:</span><strong>${momoNumber}</strong></div>
-                   <div class="bank-row"><span>Tên:</span><strong>${momoName}</strong></div>
-                 </div>`
-              : ''}
-
-            <div class="payment-warning">
-              ⚠️ <strong>Quan trọng:</strong> Nhập đúng nội dung chuyển khoản <code>${transferContent}</code> để được xử lý tự động!
-            </div>
-
-            <button class="btn btn-primary btn-lg btn-block" id="btnConfirmPayment">
-              ✅ Tôi đã chuyển khoản
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-  `
-
-  // Copy buttons
-  container.querySelectorAll('.btn-copy').forEach(btn => {
-    btn.addEventListener('click', () => {
-      navigator.clipboard.writeText(btn.dataset.copy)
-      btn.textContent = '✅'
-      setTimeout(() => btn.textContent = '📋', 1500)
-    })
-  })
-
-  // Confirm button — DB records already exist, just show the waiting UI
-  const btnConfirm = container.querySelector('#btnConfirmPayment')
-  btnConfirm.addEventListener('click', () => {
-    showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, {
-      bankName, bankAccount, bankOwner, vietqrBin
-    })
+  showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, {
+    bankName,
+    bankAccount,
+    bankOwner,
+    vietqrBin,
+    momoNumber,
+    momoName,
+    orderCode: savedSession?.orderCode || '',
+    storeSlug: checkoutStore?.slug || '',
+    paymentSource: paymentCfg.source || 'site',
+    sellerStoreId
   })
 }
 
@@ -247,6 +162,18 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
   const bankName    = bankInfo.bankName    || window.__siteSettings?.bank_name    || 'MB Bank'
   const bankAccount = bankInfo.bankAccount || window.__siteSettings?.bank_account || '321336'
   const bankOwner   = bankInfo.bankOwner   || window.__siteSettings?.bank_owner   || ''
+  const vietqrBin   = bankInfo.vietqrBin || '970422'
+  const momoNumber  = bankInfo.momoNumber  || ''
+  const momoName    = bankInfo.momoName    || ''
+  const orderCode   = bankInfo.orderCode   || ''
+  const storeSlug   = bankInfo.storeSlug   || ''
+  const paymentSource = bankInfo.paymentSource || 'site'
+  const sellerStoreIdInfo = bankInfo.sellerStoreId
+
+  const planService     = plan.service          || 'netflix'
+  const planFulfillment = plan.fulfillment_type || (planService === 'netflix' ? 'netflix' : 'manual')
+  const isNetflixPlan   = planService === 'netflix'
+  const isManualService = planFulfillment === 'manual'
 
   container.innerHTML = `
     <section class="payment-section">
@@ -254,19 +181,19 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
 
         <div class="payment-card" style="text-align:center;">
 
-          <!-- Spinner / Success icon -->
-          <div class="waiting-spinner" id="waitSpinner">
-            <div class="spinner" style="margin:0 auto 20px;"></div>
-          </div>
-          <div id="waitIcon" class="success-icon" style="display:none;font-size:64px;margin-bottom:16px;">🎉</div>
-
-          <h2 id="waitTitle" style="font-size:22px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">
-            ⏳ Đang chờ xác nhận thanh toán...
-          </h2>
-          <p id="waitDesc" style="color:var(--text-secondary);font-size:14px;margin:0 0 24px;line-height:1.7;">
-            Hệ thống tự động kiểm tra giao dịch ngân hàng mỗi 10 giây.<br>
-            Vui lòng <strong style="color:var(--text-primary);">không tắt trang</strong> này.
-          </p>
+          <div id="payDetailsWrap" style="text-align:left;">
+            <h1 class="page-title" style="text-align:center;margin-bottom:20px;">Thanh toán</h1>
+            <div style="margin-bottom:20px;padding:16px 18px;border:1px solid var(--border);border-radius:12px;background:var(--surface-elevated, var(--bg-muted));">
+              <div style="font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Đơn hàng</div>
+              ${orderCode ? `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:2px solid var(--primary-ring);margin-bottom:6px;font-size:14px;">
+                <span>Mã đơn</span>
+                <strong style="font-family:var(--mono);color:var(--primary);">#${orderCode}</strong>
+              </div>` : ''}
+              <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:14px;"><span style="color:var(--text-secondary);">Gói</span><strong>${plan.name || planLabel(plan.id)}</strong></div>
+              <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:14px;"><span style="color:var(--text-secondary);">Thời hạn</span><strong>${plan.duration_days} ngày</strong></div>
+              <div style="display:flex;justify-content:space-between;padding:8px 0 0;font-size:15px;"><span style="color:var(--text-secondary);">Tổng</span><strong class="price-highlight">${formatVND(plan.price)}</strong></div>
+              ${sellerStoreIdInfo && storeSlug ? `<div style="font-size:13px;color:var(--text-secondary);padding-top:8px;">Gian hàng: <strong>#/s/${storeSlug}</strong>${paymentSource === 'seller' ? ' · Thanh toán về TK đại lý' : ''}</div>` : ''}
+            </div>
 
           <!-- Transfer reminder -->
           <div id="transferReminder"
@@ -291,7 +218,7 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
               <strong style="color:var(--primary);font-size:18px;font-weight:800;">${formatVND(plan.price)}</strong>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:14px;">
-              <span style="color:var(--text-secondary);">Nội dung CK</span>
+              <span style="color:var(--text-secondary);">Nội dung chuyển khoản</span>
               <div style="display:flex;align-items:center;gap:8px;">
                 <strong id="tcDisplay" style="font-family:var(--mono);color:var(--secondary-hover);font-size:15px;letter-spacing:1px;">${transferContent}</strong>
                 <button class="btn-copy" id="tcCopy" data-copy="${transferContent}"
@@ -301,6 +228,34 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
               </div>
             </div>
           </div>
+
+          ${bankAccount ? `<div class="bank-qr" style="text-align:center;margin-bottom:18px;">
+              <img src="https://img.vietqr.io/image/${vietqrBin}-${bankAccount}-compact.jpg?amount=${plan.price}&addInfo=${encodeURIComponent(transferContent)}&accountName=${encodeURIComponent(bankOwner)}" alt="VietQR" class="qr-img" style="max-width:280px;width:100%;border-radius:8px;" onerror="this.style.display='none'">
+              <p style="font-size:13px;color:var(--text-secondary);margin:8px 0 0;">Quét mã QR để chuyển khoản nhanh</p>
+            </div>` : ''}
+          ${momoNumber ? `<div style="margin-bottom:18px;padding:14px 16px;border:1px solid var(--border);border-radius:12px;">
+              <div style="font-weight:600;margin-bottom:8px;">MoMo</div>
+              <div style="font-size:14px;"><span style="color:var(--text-secondary);">Số: </span><strong>${momoNumber}</strong></div>
+              <div style="font-size:14px;"><span style="color:var(--text-secondary);">Tên: </span><strong>${momoName}</strong></div>
+            </div>` : ''}
+          <div style="font-size:13px;color:var(--text-secondary);margin-bottom:22px;line-height:1.55;">
+            <strong>Quan trọng:</strong> Nhập đúng nội dung chuyển khoản <code style="font-family:var(--mono);">${transferContent}</code>. Sau khi chuyển, trang tự nhận — không cần bấm thêm.
+          </div>
+          </div>
+
+          <!-- Spinner / Success icon -->
+          <div class="waiting-spinner" id="waitSpinner">
+            <div class="spinner" style="margin:0 auto 20px;"></div>
+          </div>
+          <div id="waitIcon" class="success-icon" style="display:none;font-size:64px;margin-bottom:16px;">🎉</div>
+
+          <h2 id="waitTitle" style="font-size:22px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">
+            ⏳ Đang chờ xác nhận chuyển khoản...
+          </h2>
+          <p id="waitDesc" style="color:var(--text-secondary);font-size:14px;margin:0 0 24px;line-height:1.7;">
+            Chuyển khoản theo thông tin trên. Hệ thống tự động kiểm tra giao dịch khoảng mỗi 10 giây.<br>
+            Vui lòng <strong style="color:var(--text-primary);">không tắt trang</strong> sau khi đã chuyển khoản.
+          </p>
 
           <!-- Progress bar -->
           <div style="background:var(--bg-muted);border-radius:99px;height:5px;margin-bottom:12px;overflow:hidden;">
@@ -417,12 +372,6 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
 
   let linkPollTimer = null
 
-  // Determine plan type (Netflix vs manual service vs stock product)
-  const planService     = plan.service          || 'netflix'
-  const planFulfillment = plan.fulfillment_type || (planService === 'netflix' ? 'netflix' : 'manual')
-  const isNetflixPlan   = planService === 'netflix'
-  const isManualService = planFulfillment === 'manual'
-
   function showSuccess(data) {
     if (SESSION_KEY) { try { sessionStorage.removeItem(SESSION_KEY) } catch (_) {} }
     clearCheckoutStore()
@@ -430,7 +379,9 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
     waitSpinner.style.display   = 'none'
     waitIcon.style.display      = 'block'
     progressBar.style.width     = '100%'
-    transferRem.style.display   = 'none'
+    const payDetails = container.querySelector('#payDetailsWrap')
+    if (payDetails) payDetails.style.display = 'none'
+    else if (transferRem) transferRem.style.display = 'none'
     if (elapsedText_el) elapsedText_el.style.display = 'none'
 
     // ── Manual service: admin xử lý tay ──

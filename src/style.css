@@ -277,6 +277,11 @@ a:hover { color: var(--primary-hover); }
 .btn-block { width: 100%; }
 
 /* ── Navbar ──────────────────────────────────────────────────── */
+/* navDrawerHost: drawer under body so fixed panel is not clipped by navbar backdrop-filter */
+#navDrawerHost {
+  display: contents;
+}
+
 #navbar {
   position: fixed;
   top: 0; left: 0; right: 0;
@@ -865,11 +870,27 @@ body.nav-drawer-open {
     padding: 0 var(--sp-4);
     height: var(--nav-h);
   }
-  .nav-logo { order: 0; }
-  .nav-toggle { order: 2; margin-left: auto; }
+  .nav-logo {
+    order: 0;
+    min-width: 0;
+    max-width: min(58vw, 280px);
+  }
+  .logo-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .nav-toggle {
+    order: 2;
+    margin-left: auto;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 2;
+    display: flex;
+  }
   .nav-center { display: none !important; }
   .nav-cluster-desktop { display: none !important; }
-  .nav-toggle { display: flex; }
 }
 @media (min-width: 901px) {
   .nav-drawer,
