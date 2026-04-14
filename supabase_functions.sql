@@ -2,37 +2,124 @@
 -- NETFLIX STORE — Supabase: hàm RPC + index bổ trợ
 -- ============================================================
 --
--- THỨ TỰ CHO KHÁCH TRIỂN KHAI (bắt buộc đọc):
---   1) Chạy schema nền trước — một trong hai:
---        • supabase/schema.sql  (repo mặc định)
---        • supabase/buyer_schema_empty.sql  (bản “full” gói bán)
---   2) Nếu dùng gian hàng đại lý: supabase/fix_seller_tracking.sql (và các fix_seller*.sql cần thiết)
---   3) Cuối cùng chạy FILE NÀY trong Supabase → SQL Editor (một lần, hoặc khi nâng cấp hàm)
---
--- File này KHÔNG tạo lại bảng profiles/plans/payments/… — tránh trùng và lệch RLS với schema.sql.
--- Chỉ: cột phụ (nếu thiếu), 3 hàm RPC, index, GRANT cho claim_warranty (gọi từ app khách).
+-- THỨ TỰ KHUYẾN NGHỊ:
+--   • DB trống / lỗi 42P01 "relation subscriptions does not exist" → chỉ cần chạy FILE NÀY (đủ bootstrap + RPC).
+--   • Đã có schema đầy đủ → chạy lại file này vẫn an toàn (IF NOT EXISTS / OR REPLACE / ON CONFLICT).
+--   • Gian hàng đại lý: sau đó chạy supabase/fix_seller_tracking.sql nếu cần.
+--   • RLS + is_admin + policies đầy đủ: chạy thêm supabase/schema.sql (phần policy) hoặc buyer_schema_empty.sql.
 --
 -- ============================================================
 
 -- ────────────────────────────────────────────────────────────
--- 0. Cột mà các hàm bên dưới cần (DB cũ / clone thường thiếu)
+-- 0a. Bootstrap — tạo bảng cốt lõi nếu chưa có (tránh 42P01)
 -- ────────────────────────────────────────────────────────────
-ALTER TABLE subscriptions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email TEXT,
+  role TEXT DEFAULT 'user',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email)
+  VALUES (NEW.id, NEW.email)
+  ON CONFLICT (id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+CREATE TABLE IF NOT EXISTS public.plans (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  price INTEGER,
+  duration_days INTEGER
+);
+
+INSERT INTO public.plans (id, name, price, duration_days) VALUES
+  ('day',       'Gói 1 Ngày',   15000,   1),
+  ('month',     'Gói 1 Tháng',   50000,  30),
+  ('quarter',   'Gói 3 Tháng',  140000,  90),
+  ('half_year', 'Gói 6 Tháng',  270000, 180),
+  ('year',      'Gói 1 Năm',    500000, 365)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS public.subscriptions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  plan TEXT NOT NULL REFERENCES public.plans(id),
+  start_at TIMESTAMPTZ,
+  end_at TIMESTAMPTZ,
+  login_link TEXT,
+  status TEXT DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.payments (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  subscription_id UUID REFERENCES public.subscriptions(id) ON DELETE SET NULL,
+  amount INTEGER NOT NULL,
+  plan TEXT REFERENCES public.plans(id),
+  method TEXT,
+  transfer_content TEXT,
+  status TEXT DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.resources (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  type TEXT,
+  value TEXT,
+  status TEXT DEFAULT 'available',
+  assigned_to UUID REFERENCES public.subscriptions(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  note TEXT,
+  max_slots INT DEFAULT 5,
+  assigned_count INT DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS public.settings (
+  key TEXT PRIMARY KEY,
+  value TEXT DEFAULT '',
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+UPDATE public.resources SET max_slots = 5 WHERE max_slots IS NULL;
+UPDATE public.resources SET assigned_count = 0 WHERE assigned_count IS NULL;
+
+-- ────────────────────────────────────────────────────────────
+-- 0b. Cột bổ sung trên DB cũ (bảng đã tồn tại nhưng thiếu cột)
+-- ────────────────────────────────────────────────────────────
+ALTER TABLE public.subscriptions
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
-UPDATE subscriptions
+UPDATE public.subscriptions
 SET updated_at = COALESCE(updated_at, created_at, NOW())
 WHERE updated_at IS NULL;
 
-ALTER TABLE resources
+ALTER TABLE public.resources
   ADD COLUMN IF NOT EXISTS assigned_count INT DEFAULT 0;
-ALTER TABLE resources
+ALTER TABLE public.resources
   ADD COLUMN IF NOT EXISTS max_slots INT DEFAULT 5;
-ALTER TABLE resources
+ALTER TABLE public.resources
   ADD COLUMN IF NOT EXISTS note TEXT;
 
-UPDATE resources SET max_slots = 5 WHERE max_slots IS NULL;
-UPDATE resources SET assigned_count = 0 WHERE assigned_count IS NULL;
+UPDATE public.resources SET max_slots = 5 WHERE max_slots IS NULL;
+UPDATE public.resources SET assigned_count = 0 WHERE assigned_count IS NULL;
 
 
 -- ────────────────────────────────────────────────────────────
