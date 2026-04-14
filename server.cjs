@@ -32,9 +32,21 @@ const GMAIL_USER = process.env.GMAIL_USER || ''
 const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD || ''
 const EMAIL_FROM = process.env.EMAIL_FROM || GMAIL_USER
 
-const SEPAY_API_TOKEN = process.env.SEPAY_API_TOKEN || ''
 const ADMIN_SECRET = process.env.ADMIN_SECRET || ''
+/** Webhook tùy chọn (định dạng cũ tương thích SePay VA) — xác nhận qua poll MBBank là chính. */
 const SEPAY_WEBHOOK_SECRET = process.env.SEPAY_WEBHOOK_SECRET || ''
+
+/** MB Bank qua <https://thueapibank.vn/home/mbbank> — poll lịch sử API. */
+const MBBANK_PORTAL_URL = 'https://thueapibank.vn/home/mbbank'
+const MBBANK_API_TOKEN = String(process.env.MBBANK_API_TOKEN || '').trim()
+const MBBANK_HISTORY_BASE = String(
+  process.env.MBBANK_HISTORY_BASE || 'https://thueapibank.vn/historyapimbbank'
+).replace(/\/$/, '')
+
+/** Fallback STK / chủ TK site khi bảng settings chưa điền (ưu tiên giá trị trong Admin). */
+const DEFAULT_BANK_NAME = process.env.DEFAULT_BANK_NAME || ''
+const DEFAULT_BANK_ACCOUNT = process.env.DEFAULT_BANK_ACCOUNT || ''
+const DEFAULT_BANK_OWNER = process.env.DEFAULT_BANK_OWNER || ''
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''
 const SUPABASE_ANON_KEY =
@@ -907,13 +919,9 @@ async function processConfirmedPayment(transferContent, amount) {
   return { ...outcome, login_link: loginLink }
 }
 
-// ===================== SEPAY POLLING =====================
-let lastSePayTxId = 0
-let sepayAuthFailStreak = 0
-let sepayPollPausedUntil = 0
-
-const SEPAY_AUTH_FAIL_CAP = 3
-const SEPAY_POLL_PAUSE_MS = 30 * 60 * 1000
+// ===================== BANK API HELPERS (poll lịch sử MB) =====================
+const BANK_POLL_AUTH_FAIL_CAP = 3
+const BANK_POLL_PAUSE_MS = 30 * 60 * 1000
 
 function sepayResponseText(data) {
   if (data == null) return ''
@@ -951,69 +959,95 @@ function sepayIsDatabaseOrConnError(errMsg) {
   )
 }
 
-function sepayNoteAuthFailure(detail) {
-  sepayAuthFailStreak++
-  if (sepayAuthFailStreak < SEPAY_AUTH_FAIL_CAP) {
-    console.warn(`[SePay Poll] Lỗi xác thực (${sepayAuthFailStreak}/${SEPAY_AUTH_FAIL_CAP}). Kiểm tra SEPAY_API_TOKEN.`)
+// ===================== MBBANK (thueapibank.vn) POLLING =====================
+let mbbankAuthFailStreak = 0
+let mbbankPollPausedUntil = 0
+const processedMbbankRefNos = new Set()
+const MBBANK_PROCESSED_CAP = 800
+
+function mbbankNoteAuthFailure(detail) {
+  mbbankAuthFailStreak++
+  if (mbbankAuthFailStreak < BANK_POLL_AUTH_FAIL_CAP) {
+    console.warn(
+      `[MBBank Poll] Lỗi API (${mbbankAuthFailStreak}/${BANK_POLL_AUTH_FAIL_CAP}). Kiểm tra MBBANK_API_TOKEN — ${MBBANK_PORTAL_URL}`
+    )
     return
   }
-  sepayAuthFailStreak = 0
-  sepayPollPausedUntil = Date.now() + SEPAY_POLL_PAUSE_MS
+  mbbankAuthFailStreak = 0
+  mbbankPollPausedUntil = Date.now() + BANK_POLL_PAUSE_MS
   console.error(
-    '[SePay Poll] Tạm dừng 30 phút — token SePay không hợp lệ hoặc API đang chặn (circuit breaker).',
-    'Sửa SEPAY_API_TOKEN trong .env rồi: pm2 restart netflix-store.',
-    detail ? `Gợi ý: ${String(detail).slice(0, 280)}` : ''
+    '[MBBank Poll] Tạm dừng 30 phút — token hoặc endpoint không hợp lệ.',
+    detail ? String(detail).slice(0, 280) : ''
   )
 }
 
-function sepayClearAuthFailure() {
-  sepayAuthFailStreak = 0
+function mbbankClearAuthFailure() {
+  mbbankAuthFailStreak = 0
 }
 
-async function checkSePayTransactions() {
-  if (!SEPAY_API_TOKEN) return
+function rememberMbbankRef(key) {
+  if (!key) return
+  processedMbbankRefNos.add(key)
+  while (processedMbbankRefNos.size > MBBANK_PROCESSED_CAP) {
+    const first = processedMbbankRefNos.values().next().value
+    processedMbbankRefNos.delete(first)
+  }
+}
+
+/** Không trùng refNo → dùng ngày + tiền + mô tả để không xử lý lặp mỗi 5s. */
+function mbbankDedupeKey(tx) {
+  const ref = tx.refNo || tx.tranId
+  if (ref) return String(ref)
+  const d = tx.postingDate || tx.transactionDate || ''
+  const amt = String(tx.creditAmount ?? '')
+  const desc = String(tx.description || '').slice(0, 160)
+  return `noderef:${d}|${amt}|${desc}`
+}
+
+/**
+ * GET {MBBANK_HISTORY_BASE}/{token} → { status, TranList: [{ refNo, creditAmount, description, ... }] }
+ * Khớp pending payment: nội dung CK chứa transfer_content và số tiền >= amount.
+ */
+async function checkMbbankTransactions() {
+  if (!MBBANK_API_TOKEN) return
 
   const now = Date.now()
-  if (sepayPollPausedUntil && now < sepayPollPausedUntil) return
-  if (sepayPollPausedUntil && now >= sepayPollPausedUntil) {
-    console.log('[SePay Poll] Hết thời gian tạm dừng — thử kết nối lại.')
-    sepayPollPausedUntil = 0
-    sepayClearAuthFailure()
+  if (mbbankPollPausedUntil && now < mbbankPollPausedUntil) return
+  if (mbbankPollPausedUntil && now >= mbbankPollPausedUntil) {
+    console.log('[MBBank Poll] Hết thời gian tạm dừng — thử kết nối lại.')
+    mbbankPollPausedUntil = 0
+    mbbankClearAuthFailure()
   }
 
   try {
-    const response = await axios.get('https://my.sepay.vn/userapi/transactions/list', {
-      params: { limit: 100 },
-      headers: {
-        Authorization: `Bearer ${SEPAY_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
+    const url = `${MBBANK_HISTORY_BASE}/${encodeURIComponent(MBBANK_API_TOKEN)}`
+    const response = await axios.get(url, {
+      timeout: 15000,
+      headers: { Accept: 'application/json' }
     })
-
     const data = response.data
     const bodyStr = sepayResponseText(data)
 
-    if (data?.status !== 200) {
-      if (sepayIsAuthOrCircuitProblem(response.status, bodyStr, '')) {
-        sepayNoteAuthFailure(bodyStr.slice(0, 400))
+    if (data?.status !== 'success' || !Array.isArray(data.TranList)) {
+      if (sepayIsAuthOrCircuitProblem(response.status, bodyStr, data?.message || '')) {
+        mbbankNoteAuthFailure(bodyStr.slice(0, 400))
       } else {
-        console.warn('[SePay Poll] API trả lỗi:', bodyStr.slice(0, 200))
+        console.warn('[MBBank Poll] API không success hoặc thiếu TranList:', bodyStr.slice(0, 220))
       }
       return
     }
 
-    sepayClearAuthFailure()
-    const transactions = data.transactions || []
+    mbbankClearAuthFailure()
+    const list = data.TranList
 
-    for (const tx of transactions) {
-      const txId = parseInt(tx.id) || 0
-      if (txId <= lastSePayTxId) continue
+    for (const tx of list) {
+      const dedupeKey = mbbankDedupeKey(tx)
+      if (processedMbbankRefNos.has(dedupeKey)) continue
 
-      const amountIn = parseFloat(tx.amount_in || 0)
+      const amountIn = parseFloat(String(tx.creditAmount ?? '0').replace(/,/g, '')) || 0
       if (amountIn <= 0) continue
 
-      const txContent = tx.transaction_content || ''
+      const txContent = String(tx.description || '')
       let client
       try {
         client = await dbPool.connect()
@@ -1027,20 +1061,16 @@ async function checkSePayTransactions() {
           [txContent, amountIn]
         )
         if (matches.rows.length > 0) {
-          console.log(`[SePay] ✅ MATCHED tx=${tx.id} content="${txContent}"`)
+          const refLabel = tx.refNo || tx.tranId || dedupeKey.slice(0, 40)
+          console.log(`[MBBank] ✅ MATCHED ref=${refLabel} content="${txContent.slice(0, 80)}"`)
           await processConfirmedPayment(matches.rows[0].transfer_content, amountIn)
+          rememberMbbankRef(dedupeKey)
         }
       } catch (dbErr) {
-        console.error('[SePay Poll] ❌ Lỗi DB khi xử lý tx', tx.id, '—', dbErr.message.slice(0, 200))
-        console.error('[SePay Poll] Kiểm tra DATABASE_URL trong .env trên máy chạy PM2.')
+        console.error('[MBBank Poll] ❌ Lỗi DB —', dbErr.message.slice(0, 200))
       } finally {
         if (client) client.release()
       }
-    }
-
-    if (transactions.length > 0) {
-      const maxId = Math.max(...transactions.map(t => parseInt(t.id) || 0))
-      if (maxId > lastSePayTxId) lastSePayTxId = maxId
     }
   } catch (err) {
     const st = err.response?.status
@@ -1048,22 +1078,22 @@ async function checkSePayTransactions() {
     const msg = String(err.message || '')
 
     if (sepayIsDatabaseOrConnError(msg)) {
-      console.error(
-        '[SePay Poll] ❌ Lỗi Postgres / kết nối DB (không phải lỗi token SePay).',
-        'Kiểm tra DATABASE_URL trong .env trên máy PM2.',
-        msg.slice(0, 220)
-      )
+      console.error('[MBBank Poll] ❌ Lỗi Postgres / kết nối DB —', msg.slice(0, 220))
       return
     }
 
     if (err.response && sepayIsAuthOrCircuitProblem(st, bodyStr, err.message)) {
-      sepayNoteAuthFailure(bodyStr || err.message)
+      mbbankNoteAuthFailure(bodyStr || err.message)
     } else if (!err.response) {
-      console.error('[SePay Poll] ❌ Network/timeout/unknown error:', msg.slice(0, 200))
+      console.error('[MBBank Poll] ❌ Network/timeout:', msg.slice(0, 200))
     } else {
-    console.error('[SePay Poll]', err.message)
+      console.error('[MBBank Poll]', err.message)
     }
   }
+}
+
+async function pollIncomingBankTransactions() {
+  await checkMbbankTransactions()
 }
 
 // ===================== EXPIRY / REMINDER / HEALTH =====================
@@ -1554,13 +1584,13 @@ app.post('/sepay-webhook', async (req, res) => {
   if (SEPAY_WEBHOOK_SECRET) {
     const provided = req.headers['x-sepay-signature'] || req.headers['x-webhook-secret'] || ''
     if (provided !== SEPAY_WEBHOOK_SECRET) {
-      console.warn('[SePay Webhook] ⚠️ Invalid signature, rejected')
+      console.warn('[Payment Webhook] ⚠️ Invalid signature, rejected')
       return res.status(401).json({ error: 'Invalid signature' })
     }
   }
 
   try {
-    console.log('[SePay Webhook] Received:', JSON.stringify(req.body))
+    console.log('[Payment Webhook] Received:', JSON.stringify(req.body))
     const txData = req.body
     const amountIn = parseFloat(txData.amount_in || txData.transferAmount || 0)
     const txContent = txData.transaction_content || txData.content || txData.description || ''
@@ -1579,10 +1609,10 @@ app.post('/sepay-webhook', async (req, res) => {
         [txContent, amountIn]
       )
       if (matches.rows.length > 0) {
-        console.log(`[SePay Webhook] ✅ Matched: ${matches.rows[0].transfer_content}`)
+        console.log(`[Payment Webhook] ✅ Matched: ${matches.rows[0].transfer_content}`)
         await processConfirmedPayment(matches.rows[0].transfer_content, amountIn)
       } else {
-        console.log(`[SePay Webhook] No match for content="${txContent}" amount=${amountIn}`)
+        console.log(`[Payment Webhook] No match for content="${txContent}" amount=${amountIn}`)
       }
     } finally {
       client.release()
@@ -1590,7 +1620,7 @@ app.post('/sepay-webhook', async (req, res) => {
 
     res.json({ success: true })
   } catch (err) {
-    console.error('[SePay Webhook] Error:', err.message)
+    console.error('[Payment Webhook] Error:', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })
@@ -2101,31 +2131,49 @@ app.patch('/api/admin/settings', requireAdmin, async (req, res) => {
   }
 })
 
-app.get('/api/sepay-debug', requireAdmin, async (req, res) => {
+async function handleMbbankDebug(req, res) {
   try {
-    const response = await axios.get('https://my.sepay.vn/userapi/transactions/list', {
-      params: { limit: 10 },
-      headers: {
-        Authorization: `Bearer ${SEPAY_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 10000
+    if (!MBBANK_API_TOKEN) {
+      return res.json({
+        success: false,
+        error: 'Chưa cấu hình MBBANK_API_TOKEN trong .env',
+        portal: MBBANK_PORTAL_URL
+      })
+    }
+    const url = `${MBBANK_HISTORY_BASE}/${encodeURIComponent(MBBANK_API_TOKEN)}`
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: { Accept: 'application/json' }
     })
-
+    const data = response.data
+    const list = Array.isArray(data?.TranList) ? data.TranList : []
     res.json({
       success: true,
-      sePayStatus: response.data?.status,
-      totalTransactions: (response.data?.transactions || []).length,
-      latestTransactions: (response.data?.transactions || []).slice(0, 5).map(t => ({
-        id: t.id,
-        date: t.transaction_date,
-        amount_in: t.amount_in,
-        content: t.transaction_content
+      portal: MBBANK_PORTAL_URL,
+      apiStatus: data?.status,
+      message: data?.message,
+      total: list.length,
+      latest: list.slice(0, 8).map((t) => ({
+        refNo: t.refNo,
+        postingDate: t.postingDate,
+        creditAmount: t.creditAmount,
+        description: t.description ? String(t.description).slice(0, 120) : ''
       }))
     })
   } catch (error) {
-    res.json({ success: false, error: error.message, response: error.response?.data })
+    res.json({
+      success: false,
+      error: error.message,
+      portal: MBBANK_PORTAL_URL,
+      response: error.response?.data
+    })
   }
+}
+
+app.get('/api/mbbank-debug', requireAdmin, handleMbbankDebug)
+app.get('/api/sepay-debug', requireAdmin, (req, res) => {
+  res.set('X-Deprecated-Endpoint', '/api/mbbank-debug')
+  handleMbbankDebug(req, res)
 })
 
 // ===================== SELLER PUBLIC BUNDLE (giá + thanh toán) =====================
@@ -2155,11 +2203,14 @@ function resolvePaymentDisplay(storeRow, settings) {
     const t = v && String(v).trim()
     return t && /^\d{6}$/.test(t) ? t : '970422'
   }
+  const siteName = (s.bank_name && String(s.bank_name).trim()) || DEFAULT_BANK_NAME || 'MB Bank'
+  const siteAcct = (s.bank_account && String(s.bank_account).trim()) || DEFAULT_BANK_ACCOUNT
+  const siteOwner = (s.bank_owner && String(s.bank_owner).trim()) || DEFAULT_BANK_OWNER
   return {
     source: useSeller ? 'seller' : 'site',
-    bank_name: useSeller ? (storeRow.bank_name || 'Ngân hàng') : (s.bank_name || 'MB Bank'),
-    bank_account: useSeller ? storeRow.bank_account : (s.bank_account || ''),
-    bank_owner: useSeller ? (storeRow.bank_owner || '') : (s.bank_owner || ''),
+    bank_name: useSeller ? (storeRow.bank_name || 'Ngân hàng') : siteName,
+    bank_account: useSeller ? storeRow.bank_account : siteAcct,
+    bank_owner: useSeller ? (storeRow.bank_owner || '') : siteOwner,
     momo_number: useSeller ? (storeRow.momo_number || '') : (s.momo_number || ''),
     momo_name: useSeller ? (storeRow.momo_name || '') : (s.momo_name || ''),
     vietqr_bank_bin: useSeller ? bin(storeRow.vietqr_bank_bin) : bin(s.vietqr_bank_bin)
@@ -2642,8 +2693,8 @@ setTimeout(() => {
 }, 8000)
 
 setTimeout(() => {
-  checkSePayTransactions()
-  setInterval(checkSePayTransactions, 5000)
+  pollIncomingBankTransactions()
+  setInterval(pollIncomingBankTransactions, 5000)
 }, 3000)
 
 setTimeout(() => {
@@ -2692,9 +2743,9 @@ app.listen(PORT, () => {
   console.log(`   GET  /api/guides`)
   console.log(`   POST /api/tv-init`)
   console.log(`   POST /api/tv-submit`)
-  console.log(`   POST /sepay-webhook`)
+  console.log(`   POST /sepay-webhook  (webhook tùy chọn, định dạng cũ)`)
   console.log(`   GET  /api/payment-status/:code`)
-  console.log(`   GET  /api/sepay-debug`)
+  console.log(`   GET  /api/mbbank-debug  (admin — lịch sử MB, ${MBBANK_PORTAL_URL})`)
   console.log(`   GET  /api/test-db`)
   console.log(`   GET  /api/store/by-host  (tên miền riêng → Host header)`)
   console.log(`   GET  /api/store/:slug  (gian hàng công khai)`)
@@ -2702,5 +2753,11 @@ app.listen(PORT, () => {
   console.log(`   GET  /api/checkout/quote  /api/public/plans  (giá đại lý)`)
   console.log(`   GET/PUT /api/seller/plan-prices`)
   console.log(`   MAIN_DOMAINS (site chính, không coi là gian hàng): ${[...MAIN_DOMAIN_SET].join(', ') || '(empty)'}`)
-  console.log(`   SePay polling: every 5s ${SEPAY_API_TOKEN ? '✅ ACTIVE' : '❌ NO TOKEN'}`)
+  if (MBBANK_API_TOKEN) {
+    console.log(`   MBBank polling: every 5s ✅ ACTIVE  ${MBBANK_HISTORY_BASE}/…`)
+  } else {
+    console.warn(
+      `   MBBank polling: ❌ CHƯA CÓ MBBANK_API_TOKEN — đăng ký/lấy token: ${MBBANK_PORTAL_URL}`
+    )
+  }
 })

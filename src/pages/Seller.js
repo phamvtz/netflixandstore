@@ -20,6 +20,7 @@ const IC_EXT    = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" s
 const IC_OK     = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
 const IC_PLUS   = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`
 const IC_SERVER = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`
+const IC_API    = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -354,6 +355,37 @@ export async function renderSeller(container) {
       `
     })}
 
+    <!-- ── API (tích hợp server / app riêng) ─────────────────── -->
+    ${card({ id:'sc-api', icon: IC_API, title:'API & tích hợp', theme:'violet',
+      sub: 'Gọi REST từ backend hoặc script — endpoint công khai dùng sellerStoreId; quản lý gian hàng cần JWT (Supabase) sau đăng nhập tài khoản seller.',
+      body: `
+        <div class="sl-info-note" style="margin-bottom:12px;">
+          Header bảo vệ: <code class="sl-code-inline">Authorization: Bearer &lt;access_token&gt;</code>
+          (cùng phiên đăng nhập web). Trên server riêng, đăng nhập Supabase (service) hoặc trao đổi token an toàn — không hard-code token vào app công khai.
+        </div>
+        <div class="sl-link-group">
+          <div class="sl-link-label">sellerStoreId (tham số <code class="sl-code-inline">sellerStoreId</code> / quote)</div>
+          <div class="sl-link-row">
+            <code class="sl-link-val">${esc(store.id)}</code>
+            <button class="sl-icon-btn" id="cpStoreId" title="Copy">${IC_COPY}</button>
+          </div>
+        </div>
+        <div class="sl-link-group" style="margin-top:12px;">
+          <div class="sl-link-label">Base URL (API Express)</div>
+          <div class="sl-link-row">
+            <code class="sl-link-val" id="slApiBase">${esc(window.location.origin)}</code>
+            <button class="sl-icon-btn" id="cpApiBase" title="Copy">${IC_COPY}</button>
+          </div>
+        </div>
+        <p class="sl-hint" style="margin-top:10px;">
+          Ví dụ công khai: <code class="sl-code-inline">GET …/api/public/plans?sellerStoreId=${esc(store.id)}</code>
+        </p>
+        <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+          <a href="${esc(origin)}#/api-docs" class="btn btn-sm btn-outline">${IC_EXT} Tài liệu API đầy đủ</a>
+          <span class="sl-hint" style="margin:0;">Mục <strong>Seller / đại lý</strong> trong trang tài liệu.</span>
+        </div>
+      `
+    })}
     <!-- ── WEBSITE (branding + identity) ─────────────────────── -->
     ${card({ id:'sc-site', icon: IC_PAINT, title:'Website', theme:'primary',
       sub: 'Thương hiệu, màu sắc, domain riêng — khách không thấy platform mẹ.',
@@ -408,8 +440,8 @@ export async function renderSeller(container) {
       sub: 'Khách thấy STK/MoMo này trên trang thanh toán của web con.',
       body: `
         <div class="sl-info-note">
-          💡 <strong>Để trống</strong> = dùng tài khoản platform mẹ (tự động xác nhận SePay).
-          Điền STK riêng = tiền về bạn nhưng cần xác nhận thủ công trên Admin hoặc tích hợp SePay riêng.
+          💡 <strong>Để trống</strong> = dùng tài khoản platform mẹ (tự động khớp qua lịch sử MB — <a href="https://thueapibank.vn/home/mbbank" target="_blank" rel="noopener">thueapibank</a>).
+          Điền STK riêng = tiền về bạn nhưng cần xác nhận thủ công trên Admin.
         </div>
         <div class="sl-grid">
           <div class="form-group">
@@ -502,6 +534,8 @@ export async function renderSeller(container) {
   /* ── Copy buttons ── */
   copyBtn(wrap.querySelector('#cpHash'), hashUrl)
   if (safeHost) copyBtn(wrap.querySelector('#cpDomain'), domainUrl)
+  copyBtn(wrap.querySelector('#cpStoreId'), store.id)
+  copyBtn(wrap.querySelector('#cpApiBase'), window.location.origin)
 
   /* ── Color sync ── */
   const ep = wrap.querySelector('#eColorPick'), et = wrap.querySelector('#eColorTxt')

@@ -65,7 +65,7 @@ server {
         style-src   'self' 'unsafe-inline' https://fonts.googleapis.com;
         font-src    'self' https://fonts.gstatic.com;
         img-src     'self' data: https://img.vietqr.io https://*.supabase.co;
-        connect-src 'self' https://*.supabase.co https://my.sepay.vn;
+        connect-src 'self' https://*.supabase.co https://thueapibank.vn;
         frame-ancestors 'none';
     " always;
 

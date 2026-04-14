@@ -11,18 +11,18 @@ const ICON_DB     = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
 const ICON_COPY   = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`
 
 const SECTIONS = [
-  { id: 'base',    label: 'Base URL'       },
-  { id: 'format',  label: 'Định dạng'      },
-  { id: 'public',  label: 'Công khai'      },
-  { id: 'netflix', label: 'Tiện ích Netflix'},
-  { id: 'webhook', label: 'Webhook'        },
-  { id: 'admin',   label: 'Admin'          },
-  { id: 'seller',  label: 'Seller / đại lý'},
-  { id: 'supabase',label: 'Supabase'       },
+  { id: 'base', label: 'Base URL' },
+  { id: 'format', label: 'Định dạng' },
+  { id: 'public', label: 'Công khai' },
+  { id: 'netflix', label: 'Tiện ích Netflix' },
+  { id: 'webhook', label: 'Webhook' },
+  { id: 'admin', label: 'Admin' },
+  { id: 'seller', label: 'Seller / đại lý' },
+  { id: 'supabase', label: 'Supabase' },
 ]
 
-export async function renderApiDocs(container) {
-  const base = `https://vplus.pro.vn`
+export function renderApiDocs(container, _params) {
+  const base = `${window.location.origin}`
 
   container.innerHTML = `
     <div class="adoc-root">
@@ -158,7 +158,7 @@ export async function renderApiDocs(container) {
             </div>
             <div class="adoc-section-body">
               ${endpointList([
-                { method:'POST', path:'/sepay-webhook', desc:'SePay gọi tự động khi có giao dịch — không dùng cho client.', res:'—' },
+                { method:'POST', path:'/sepay-webhook', desc:'Webhook tùy chọn (định dạng VA cũ). Xác nhận chính: server poll <a href="https://thueapibank.vn/home/mbbank" target="_blank" rel="noopener">thueapibank MB</a>.', res:'—' },
               ])}
             </div>
           </section>
@@ -180,7 +180,7 @@ export async function renderApiDocs(container) {
                 { method:'POST',  path:'/api/admin/test-telegram',   desc:'Gửi tin test Telegram.',                                                       res:'JSON' },
                 { method:'GET',   path:'/api/admin/settings',        desc:'Đọc cài đặt site.',                                                            res:'object' },
                 { method:'PATCH', path:'/api/admin/settings',        desc:'Body: object các key được phép (<code>site_name</code>, <code>bank_*</code>, …).', res:'{ success }' },
-                { method:'GET',   path:'/api/sepay-debug',           desc:'Debug SePay — nhạy cảm, chỉ dùng nội bộ.',                                    res:'JSON' },
+                { method:'GET',   path:'/api/mbbank-debug',            desc:'Debug lịch sử MB (thueapibank) — nhạy cảm, admin only. <code>/api/sepay-debug</code> alias cũ.', res:'JSON' },
               ])}
             </div>
           </section>

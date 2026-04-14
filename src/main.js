@@ -13,19 +13,16 @@ import { getSettings, getStoreByHost } from './utils/api.js'
 import { setCheckoutStore } from './utils/storeContext.js'
 import { renderNavbar } from './components/Navbar.js'
 import { renderFooter } from './components/Footer.js'
-import { renderHome } from './pages/Home.js'
-import { renderPlans } from './pages/Plans.js'
-import { renderLogin } from './pages/Login.js'
-import { renderDashboard } from './pages/Dashboard.js'
-import { renderPayment } from './pages/Payment.js'
-import { renderAdmin } from './pages/Admin.js'
-import { renderTools } from './pages/Tools.js'
 
-import { renderStorefront } from './pages/Storefront.js'
-import { renderApiDocs } from './pages/ApiDocs.js'
-import { renderProducts } from './pages/Products.js'
-import { renderGuides } from './pages/Guides.js'
-import { renderMovieSuggestions } from './pages/MovieSuggestions.js'
+/** Code-split theo route — giảm chunk entry & cảnh báo Vite >500kB */
+function lazyRoute(loader, exportName) {
+  return async (container, params) => {
+    const mod = await loader()
+    const render = mod[exportName]
+    if (typeof render !== 'function') throw new Error(`Thiếu export ${exportName}`)
+    return render(container, params)
+  }
+}
 
 // ── Global Toast ─────────────────────────────────────────────
 const toastEl = document.createElement('div')
@@ -135,19 +132,19 @@ async function init() {
   await Promise.all([initAuth(), applySEO()])
   await resolveCustomDomainBeforeRouter()
 
-  registerRoute('/', renderHome)
-  registerRoute('/plans', renderPlans)
-  registerRoute('/products', renderProducts)
-  registerRoute('/movies', renderMovieSuggestions)
-  registerRoute('/login', renderLogin)
-  registerRoute('/dashboard', renderDashboard)
-  registerRoute('/payment/:id', renderPayment)
-  registerRoute('/admin', renderAdmin)
-  registerRoute('/tools', renderTools)
-  registerRoute('/guides', renderGuides)
-  registerRoute('/guides/:slug', renderGuides)
-  registerRoute('/s/:slug', renderStorefront)
-  registerRoute('/api-docs', renderApiDocs)
+  registerRoute('/', lazyRoute(() => import('./pages/Home.js'), 'renderHome'))
+  registerRoute('/plans', lazyRoute(() => import('./pages/Plans.js'), 'renderPlans'))
+  registerRoute('/products', lazyRoute(() => import('./pages/Products.js'), 'renderProducts'))
+  registerRoute('/movies', lazyRoute(() => import('./pages/MovieSuggestions.js'), 'renderMovieSuggestions'))
+  registerRoute('/login', lazyRoute(() => import('./pages/Login.js'), 'renderLogin'))
+  registerRoute('/dashboard', lazyRoute(() => import('./pages/Dashboard.js'), 'renderDashboard'))
+  registerRoute('/payment/:id', lazyRoute(() => import('./pages/Payment.js'), 'renderPayment'))
+  registerRoute('/admin', lazyRoute(() => import('./pages/Admin.js'), 'renderAdmin'))
+  registerRoute('/tools', lazyRoute(() => import('./pages/Tools.js'), 'renderTools'))
+  registerRoute('/guides', lazyRoute(() => import('./pages/Guides.js'), 'renderGuides'))
+  registerRoute('/guides/:slug', lazyRoute(() => import('./pages/Guides.js'), 'renderGuides'))
+  registerRoute('/s/:slug', lazyRoute(() => import('./pages/Storefront.js'), 'renderStorefront'))
+  registerRoute('/api-docs', lazyRoute(() => import('./pages/ApiDocs.js'), 'renderApiDocs'))
 
   renderNavbar()
   renderFooter()

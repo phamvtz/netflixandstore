@@ -31,6 +31,37 @@ function escHtml(s) {
     .replace(/>/g, '&gt;')
 }
 
+function escapeAttr(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+}
+
+const DASH_SUB_FILTERS_KEY = 'dashSubFilters_v1'
+
+function loadDashSubFilters() {
+  try {
+    const j = JSON.parse(sessionStorage.getItem(DASH_SUB_FILTERS_KEY) || 'null')
+    if (!j || typeof j !== 'object') return { q: '', status: 'all', service: 'all' }
+    return {
+      q: String(j.q || ''),
+      status: String(j.status || 'all'),
+      service: String(j.service || 'all')
+    }
+  } catch {
+    return { q: '', status: 'all', service: 'all' }
+  }
+}
+
+function saveDashSubFilters(fs) {
+  try {
+    sessionStorage.setItem(DASH_SUB_FILTERS_KEY, JSON.stringify(fs))
+  } catch {
+    /* ignore */
+  }
+}
+
 async function fetchViewerNoticesBySubId() {
   try {
     const j = await getMyViewerReportNotices()
@@ -224,7 +255,51 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     return
   }
 
-  let html = '<div class="sub-list">'
+  const serviceSet = new Set()
+  subs.forEach((sub) => {
+    const plan = sub.plans || {}
+    serviceSet.add(String(plan.service || 'netflix').toLowerCase())
+  })
+  const serviceOpts = [...serviceSet]
+    .sort()
+    .map((s) => `<option value="${escapeAttr(s)}">${escHtml(s)}</option>`)
+    .join('')
+
+  const fs0 = loadDashSubFilters()
+
+  let html = `
+  <div class="dash-sub-toolbar">
+    <div class="dash-sub-toolbar__row">
+      <div class="dash-sub-field dash-sub-field--search">
+        <label class="dash-sub-toolbar__label" for="dashSubSearch">Tìm kiếm</label>
+        <input type="search" id="dashSubSearch" class="dash-sub-search-input"
+          placeholder="Mã đơn, tên gói, dịch vụ…" autocomplete="off"
+          value="${escapeAttr(fs0.q)}" />
+      </div>
+      <div class="dash-sub-field">
+        <label class="dash-sub-toolbar__label" for="dashSubFilterStatus">Trạng thái</label>
+        <select id="dashSubFilterStatus" class="dash-sub-select" aria-label="Lọc trạng thái">
+          <option value="all">Tất cả trạng thái</option>
+          <option value="active">Đang hoạt động</option>
+          <option value="expired">Hết hạn</option>
+          <option value="pending">Chờ thanh toán</option>
+          <option value="cancelled">Đã hủy</option>
+        </select>
+      </div>
+      <div class="dash-sub-field">
+        <label class="dash-sub-toolbar__label" for="dashSubFilterService">Dịch vụ</label>
+        <select id="dashSubFilterService" class="dash-sub-select" aria-label="Lọc dịch vụ">
+          <option value="all">Tất cả dịch vụ</option>
+          ${serviceOpts}
+        </select>
+      </div>
+    </div>
+    <p class="dash-sub-toolbar__meta" id="dashSubFilterMeta" aria-live="polite"></p>
+  </div>
+  <div id="dashSubEmptyFiltered" class="dash-sub-empty-filtered" style="display:none;" role="status">
+    <p>Không có đăng ký nào khớp bộ lọc hoặc từ khóa.</p>
+  </div>
+  <div class="sub-list" id="dashSubList">`
   /** Kết quả /api/check-plan-status theo subscription — dùng chặn Get Link / TV khi cần bảo hành */
   const planCheckBySub = new Map()
 
@@ -260,7 +335,7 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     const orderCode = sub.id ? '#' + sub.id.replace(/-/g,'').substring(0,8).toUpperCase() : ''
 
     html += `
-    <div class="${cardClass}" data-sub-id="${sub.id}" data-plan="${sub.plan || ''}">
+    <div class="${cardClass}" data-sub-id="${sub.id}" data-plan="${escapeAttr(sub.plan || '')}">
       <div class="sub-header">
         <div>
           <span class="sub-plan">${svcName}</span>
@@ -449,6 +524,74 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
 
   html += '</div>'
   panel.innerHTML = html
+
+  function applySubscriptionFilters() {
+    const rawQ = panel.querySelector('#dashSubSearch')?.value || ''
+    const q = rawQ.trim().toLowerCase().replace(/^#/, '').replace(/-/g, '')
+    const st = panel.querySelector('#dashSubFilterStatus')?.value || 'all'
+    const sv = panel.querySelector('#dashSubFilterService')?.value || 'all'
+    const listEl = panel.querySelector('#dashSubList')
+    const cards = listEl ? listEl.querySelectorAll(':scope > .sub-card') : []
+    let visible = 0
+    cards.forEach((card) => {
+      const id = card.dataset.subId
+      const sub = subs.find((s) => s.id === id)
+      if (!sub) {
+        card.style.display = 'none'
+        return
+      }
+      const plan = sub.plans || {}
+      const service = String(plan.service || 'netflix').toLowerCase()
+      const svcName = String(plan.name || planLabel(sub.plan) || '').toLowerCase()
+      const code = String(id).replace(/-/g, '').substring(0, 8).toLowerCase()
+      const planSlug = String(sub.plan || '').toLowerCase()
+      const idNorm = String(id).replace(/-/g, '').toLowerCase()
+      const expired = subscriptionAccessExpired(sub)
+
+      let okStatus = true
+      if (st === 'active') okStatus = sub.status === 'active' && !expired
+      else if (st === 'expired') okStatus = sub.status === 'expired' || expired
+      else if (st === 'pending') okStatus = sub.status === 'pending'
+      else if (st === 'cancelled') okStatus = sub.status === 'cancelled'
+
+      const okService = sv === 'all' || service === sv
+
+      const hay = `${code} ${svcName} ${service} ${planSlug} ${idNorm}`
+      const okSearch = !q || hay.includes(q)
+
+      const show = okStatus && okService && okSearch
+      card.style.display = show ? '' : 'none'
+      if (show) visible++
+    })
+    const emptyF = panel.querySelector('#dashSubEmptyFiltered')
+    const meta = panel.querySelector('#dashSubFilterMeta')
+    const total = subs.length
+    if (emptyF) emptyF.style.display = visible === 0 && total > 0 ? 'block' : 'none'
+    if (meta) {
+      const plain = !q && st === 'all' && sv === 'all'
+      meta.textContent = plain ? `${total} đơn` : `Hiển thị ${visible} / ${total} đơn`
+    }
+  }
+
+  const inp = panel.querySelector('#dashSubSearch')
+  const selSt = panel.querySelector('#dashSubFilterStatus')
+  const selSv = panel.querySelector('#dashSubFilterService')
+  const stOk = ['all', 'active', 'expired', 'pending', 'cancelled'].includes(fs0.status)
+  if (selSt && stOk) selSt.value = fs0.status
+  if (selSv && (fs0.service === 'all' || serviceSet.has(fs0.service))) selSv.value = fs0.service
+
+  const persistAndApply = () => {
+    saveDashSubFilters({
+      q: inp?.value || '',
+      status: selSt?.value || 'all',
+      service: selSv?.value || 'all'
+    })
+    applySubscriptionFilters()
+  }
+  inp?.addEventListener('input', persistAndApply)
+  selSt?.addEventListener('change', persistAndApply)
+  selSv?.addEventListener('change', persistAndApply)
+  applySubscriptionFilters()
 
   // ===== COPY =====
   panel.querySelectorAll('.btn-copy').forEach(btn => {

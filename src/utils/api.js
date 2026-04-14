@@ -698,3 +698,93 @@ export async function getCheckoutQuote(planId, sellerStoreId) {
   return j
 }
 
+// ==================== SELLER (JWT user role seller / admin) ====================
+function sellerParseError(text, status) {
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = { message: text }
+  }
+  throw new Error(j.message || j.error || ('Lỗi ' + status))
+}
+
+/** Gian hàng của user đang đăng nhập — null nếu chưa tạo */
+export async function getMySellerStore() {
+  const r = await userApiFetch('/api/seller/store')
+  const text = await r.text()
+  if (!r.ok) sellerParseError(text, r.status)
+  if (!text || text === 'null') return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+export async function createSellerStore(body) {
+  const r = await userApiFetch('/api/seller/store', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+  const text = await r.text()
+  if (!r.ok) sellerParseError(text, r.status)
+  try {
+    return text ? JSON.parse(text) : {}
+  } catch {
+    return {}
+  }
+}
+
+export async function updateSellerStore(partial) {
+  const r = await userApiFetch('/api/seller/store', {
+    method: 'PATCH',
+    body: JSON.stringify(partial)
+  })
+  const text = await r.text()
+  if (!r.ok) sellerParseError(text, r.status)
+  try {
+    return text ? JSON.parse(text) : {}
+  } catch {
+    return {}
+  }
+}
+
+export async function getSellerStats() {
+  const r = await userApiFetch('/api/seller/stats')
+  const text = await r.text()
+  if (!r.ok) sellerParseError(text, r.status)
+  try {
+    return text ? JSON.parse(text) : { orders: 0, revenue: 0 }
+  } catch {
+    return { orders: 0, revenue: 0 }
+  }
+}
+
+export async function getSellerMergedPlanPrices() {
+  const r = await userApiFetch('/api/seller/plan-prices')
+  const text = await r.text()
+  if (!r.ok) sellerParseError(text, r.status)
+  let j
+  try {
+    j = text ? JSON.parse(text) : {}
+  } catch {
+    j = {}
+  }
+  return j.plans || []
+}
+
+/** @param {Record<string, number>} prices map planId → giá (VND) */
+export async function putSellerPlanPrices(prices) {
+  const r = await userApiFetch('/api/seller/plan-prices', {
+    method: 'PUT',
+    body: JSON.stringify({ prices })
+  })
+  const text = await r.text()
+  if (!r.ok) sellerParseError(text, r.status)
+  try {
+    return text ? JSON.parse(text) : {}
+  } catch {
+    return {}
+  }
+}

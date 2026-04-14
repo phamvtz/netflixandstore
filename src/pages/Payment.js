@@ -114,14 +114,14 @@ export async function renderPayment(container, params) {
 
   const transferContent = savedSession?.transferContent ?? generateTransferContent()
 
-  // ── Create DB records IMMEDIATELY so the SePay webhook can match them ───────
+  // ── Create DB records IMMEDIATELY so bank sync (poll lịch sử MB / webhook) can match ──
   // BUG FIX: previously the subscription + payment rows were created only after
   // a manual step. If the user went to the banking
   // app first, the webhook fired while no DB record existed → silently discarded
   // → payment forever stuck at "pending".
   //
   // We create the records NOW (on page load) and persist them in sessionStorage.
-  // Trang tự poll SePay — không cần nút xác nhận.
+  // Trang tự poll /api/payment-status — không cần nút xác nhận.
   if (!savedSession) {
     try {
       container.innerHTML = `
@@ -552,7 +552,7 @@ function showWaitingUI(container, plan, planId, transferContent, SESSION_KEY, ba
   }
 
   // Bắt đầu ticker + polling ngay lập tức.
-  // ⚡ Quan trọng: nếu webhook SePay đã kích hoạt trong khi user đang dùng app
+  // ⚡ Quan trọng: nếu server đã xác nhận CK trong khi user đang dùng app
   // ngân hàng, lần poll ĐẦU TIÊN này sẽ trả về confirmed=true ngay lập tức.
   startTick()
   checkStatus()
