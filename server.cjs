@@ -2319,6 +2319,10 @@ app.get('/api/checkout/quote', async (req, res) => {
         plan: {
           id: base.id,
           name: base.name,
+          service: base.service || 'netflix',
+          fulfillment_type: base.fulfillment_type || (base.service === 'netflix' ? 'netflix' : 'manual'),
+          account_type: base.account_type || 'shared',
+          is_visible: base.is_visible,
           duration_days: base.duration_days,
           price,
           base_price: base.price

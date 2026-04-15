@@ -11,6 +11,21 @@ export async function adminApiFetch(url, init = {}) {
   return fetch(url, { ...init, headers })
 }
 
+async function getProfileEmailMap(rows) {
+  const ids = [...new Set((rows || []).map(row => row.user_id).filter(Boolean))]
+  if (!ids.length) return new Map()
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, email')
+    .in('id', ids)
+  if (error) {
+    console.warn('[admin] Could not load profile emails:', error.message)
+    return new Map()
+  }
+  return new Map((data || []).map(profile => [profile.id, profile.email]))
+}
+
 // ==================== PLANS ====================
 export async function getPlans() {
   const { data, error } = await supabase
@@ -223,13 +238,14 @@ export async function getUserPayments(userId) {
 export async function adminGetAllSubscriptions() {
   const { data, error } = await supabase
     .from('subscriptions')
-    .select('*, plans(*), profiles!user_id(email)')
+    .select('*, plans(*)')
     .order('created_at', { ascending: false })
   if (error) throw error
-  // Normalize: flatten profiles.email + expose plan fields
+  const profileEmails = await getProfileEmailMap(data)
+  // Normalize: attach profile email + expose plan fields
   return (data || []).map(s => ({
     ...s,
-    user_email:         s.profiles?.email    || s.user_id,
+    user_email:         profileEmails.get(s.user_id) || s.user_id,
     plan_service:       s.plans?.service     || 'netflix',
     plan_fulfillment:   s.plans?.fulfillment_type || 'netflix',
     plan_account_type:  s.plans?.account_type || 'shared',
@@ -240,12 +256,13 @@ export async function adminGetAllSubscriptions() {
 export async function adminGetAllPayments() {
   const { data, error } = await supabase
     .from('payments')
-    .select('*, plans(*), profiles!user_id(email)')
+    .select('*, plans(*)')
     .order('created_at', { ascending: false })
   if (error) throw error
+  const profileEmails = await getProfileEmailMap(data)
   return (data || []).map(p => ({
     ...p,
-    user_email: p.profiles?.email || p.user_id
+    user_email: profileEmails.get(p.user_id) || p.user_id
   }))
 }
 
