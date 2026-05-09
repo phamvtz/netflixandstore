@@ -357,11 +357,11 @@ export async function renderSeller(container) {
 
     <!-- ── API (tích hợp server / app riêng) ─────────────────── -->
     ${card({ id:'sc-api', icon: IC_API, title:'API & tích hợp', theme:'violet',
-      sub: 'Gọi REST từ backend hoặc script — endpoint công khai dùng sellerStoreId; quản lý gian hàng cần JWT (Supabase) sau đăng nhập tài khoản seller.',
+      sub: 'Gọi REST từ backend hoặc script — endpoint công khai dùng sellerStoreId; quản lý gian hàng cần JWT (MongoDB) sau đăng nhập tài khoản seller.',
       body: `
         <div class="sl-info-note" style="margin-bottom:12px;">
           Header bảo vệ: <code class="sl-code-inline">Authorization: Bearer &lt;access_token&gt;</code>
-          (cùng phiên đăng nhập web). Trên server riêng, đăng nhập Supabase (service) hoặc trao đổi token an toàn — không hard-code token vào app công khai.
+          (cùng phiên đăng nhập web). Trên server riêng, đăng nhập qua <code>/api/auth/login</code> để lấy JWT — không hard-code token vào app công khai.
         </div>
         <div class="sl-link-group">
           <div class="sl-link-label">sellerStoreId (tham số <code class="sl-code-inline">sellerStoreId</code> / quote)</div>

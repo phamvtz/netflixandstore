@@ -1,9 +1,9 @@
 import { getUser } from '../utils/auth.js'
 import {
   getUserSubscriptions, getUserPayments, getPlans, claimWarranty, reportCannotViewToAdmin,
-  getMyViewerReportNotices
+  getMyViewerReportNotices, getWalletBalance
 } from '../utils/api.js'
-import { apiGetLink, apiCheckPlanStatus, apiTvInit, apiTvSubmit } from '../utils/netflix.js'
+import { apiGetLink, apiCheckPlanStatus, apiTvInit, apiTvSubmit, apiNetflixAccountInfo } from '../utils/netflix.js'
 import {
   formatVND, formatDate, statusLabel, statusClass,
   daysLeft, planLabel, parseAccount, maskPassword
@@ -87,31 +87,99 @@ function buildRenewOptionsHtml(plansList) {
   return `<div class="renew-options">${chips.join('')}</div>`
 }
 
+/** Kiểm tra nếu kết quả API trả về lỗi thanh toán */
+function hasPaymentIssue(data) {
+  if (!data || typeof data !== 'object') return false
+  return !!(data.paymentError || data.paymentFailed || data.payment_error || data.payment_failed)
+}
+
+function updateDashboardStats(container, subs = []) {
+  const now = Date.now()
+  const active = subs.filter(s => s.status === 'active' && !subscriptionAccessExpired(s)).length
+  const pending = subs.filter(s => s.status === 'pending' || s.status === 'processing').length
+  const expiring = subs.filter((s) => {
+    if (!s.end_at || s.status !== 'active') return false
+    const diff = new Date(s.end_at).getTime() - now
+    return diff > 0 && diff <= 3 * 86400000
+  }).length
+  const set = (id, value) => {
+    const el = container.querySelector(id)
+    if (el) el.textContent = String(value)
+  }
+  set('#dashStatTotal', subs.length)
+  set('#dashStatActive', active)
+  set('#dashStatPending', pending)
+  set('#dashStatExpiring', expiring)
+}
+
 export async function renderDashboard(container) {
   const user = getUser()
   if (!user) return
+  const avatarLetter = (user?.email || 'U')[0].toUpperCase()
 
   container.innerHTML = `
     <section class="dashboard-section">
-      <div class="page-container">
-        <h1 class="page-title">Tài khoản của tôi</h1>
-        <p class="page-desc">Quản lý đăng ký dịch vụ và lịch sử thanh toán</p>
-        <div class="dash-tabs-wrap">
-          <div class="dash-tabs">
-            <div class="dash-tab-indicator" id="dashTabIndicator"></div>
-            <button class="dash-tab active" data-tab="subs">📦 Đăng ký</button>
-            <button class="dash-tab" data-tab="payments">💳 Thanh toán</button>
+      <div class="page-container dash-shell">
+        <header class="dash-hero">
+          <div class="dash-hero__identity">
+            <div class="dash-hero__avatar">${avatarLetter}</div>
+            <div>
+              <p class="dash-eyebrow">Khu vực khách hàng</p>
+              <h1 class="dash-title">Tài khoản của tôi</h1>
+              <p class="dash-desc">${escHtml(user.email || 'Quản lý đơn hàng và thanh toán')}</p>
+            </div>
+          </div>
+
+          <div class="dash-wallet-summary">
+            <span class="dash-wallet-summary__label">Số dư ví</span>
+            <strong id="dashWalletBalance">Đang tải...</strong>
+            <a href="#/wallet" class="dash-wallet-summary__link">Nạp tiền</a>
+          </div>
+        </header>
+
+        <div class="dash-summary-grid" id="dashSummaryGrid">
+          <div class="dash-summary-card">
+            <span class="dash-summary-card__label">Tổng đơn</span>
+            <strong id="dashStatTotal">-</strong>
+          </div>
+          <div class="dash-summary-card dash-summary-card--ok">
+            <span class="dash-summary-card__label">Đang hoạt động</span>
+            <strong id="dashStatActive">-</strong>
+          </div>
+          <div class="dash-summary-card dash-summary-card--wait">
+            <span class="dash-summary-card__label">Chờ xử lý</span>
+            <strong id="dashStatPending">-</strong>
+          </div>
+          <div class="dash-summary-card dash-summary-card--warn">
+            <span class="dash-summary-card__label">Sắp hết hạn</span>
+            <strong id="dashStatExpiring">-</strong>
           </div>
         </div>
-        <div class="dash-panel" id="panelSubs">
-          <div class="sub-list">
-            <div class="skeleton dash-skeleton"></div>
-            <div class="skeleton dash-skeleton"></div>
-            <div class="skeleton dash-skeleton"></div>
+
+        <div class="dash-workspace">
+          <div class="dash-tabs-wrap">
+            <div class="dash-tabs">
+              <div class="dash-tab-indicator" id="dashTabIndicator"></div>
+              <button class="dash-tab active" data-tab="subs">
+                <span class="dash-tab-icon" aria-hidden="true">▦</span>
+                Đơn hàng
+              </button>
+              <button class="dash-tab" data-tab="payments">
+                <span class="dash-tab-icon" aria-hidden="true">◱</span>
+                Thanh toán
+              </button>
+            </div>
           </div>
-        </div>
-        <div class="dash-panel" id="panelPayments" style="display:none;">
-          <div class="loading"><div class="spinner"></div></div>
+          <div class="dash-panel" id="panelSubs">
+            <div class="sub-list">
+              <div class="skeleton dash-skeleton"></div>
+              <div class="skeleton dash-skeleton"></div>
+              <div class="skeleton dash-skeleton"></div>
+            </div>
+          </div>
+          <div class="dash-panel" id="panelPayments" style="display:none;">
+            <div class="loading"><div class="spinner"></div></div>
+          </div>
         </div>
       </div>
     </section>
@@ -158,12 +226,19 @@ export async function renderDashboard(container) {
   }
 
   try {
-    const [subs, payments, renewPlans, noticesMap] = await Promise.all([
+    const [subs, payments, renewPlans, noticesMap, walletData] = await Promise.all([
       getUserSubscriptions(user.id),
       getUserPayments(user.id),
       getPlans().catch(() => []),
-      fetchViewerNoticesBySubId()
+      fetchViewerNoticesBySubId(),
+      getWalletBalance().catch(() => ({ balance: window.__walletBalance || 0 }))
     ])
+    const walletBalance = Number(walletData?.balance || 0)
+    window.__walletBalance = walletBalance
+    window.dispatchEvent(new CustomEvent('walletUpdated', { detail: { balance: walletBalance } }))
+    const walletEl = container.querySelector('#dashWalletBalance')
+    if (walletEl) walletEl.textContent = formatVND(walletBalance)
+    updateDashboardStats(container, subs)
     renderSubscriptions(panelSubs, subs, renewPlans, noticesMap)
     renderPayments(panelPayments, payments)
 
@@ -247,7 +322,7 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
   if (!subs || subs.length === 0) {
     panel.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">📦</div>
+        <div class="empty-icon">&#x1F4E6;</div>
         <h3>Chưa có đăng ký nào</h3>
         <p>Mua gói dịch vụ để bắt đầu sử dụng</p>
         <a href="#/products" class="btn btn-primary">Xem dịch vụ</a>
@@ -262,7 +337,7 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
   })
   const serviceOpts = [...serviceSet]
     .sort()
-    .map((s) => `<option value="${escapeAttr(s)}">${escHtml(s)}</option>`)
+    .map((s) => '<option value="' + escapeAttr(s) + '">' + escHtml(s) + '</option>')
     .join('')
 
   const fs0 = loadDashSubFilters()
@@ -283,6 +358,7 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
           <option value="active">Đang hoạt động</option>
           <option value="expired">Hết hạn</option>
           <option value="pending">Chờ thanh toán</option>
+          <option value="processing">Chờ admin</option>
           <option value="cancelled">Đã hủy</option>
         </select>
       </div>
@@ -300,10 +376,429 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     <p>Không có đăng ký nào khớp bộ lọc hoặc từ khóa.</p>
   </div>
   <div class="sub-list" id="dashSubList">`
-  /** Kết quả /api/check-plan-status theo subscription — dùng chặn Get Link / TV khi cần bảo hành */
+
   const planCheckBySub = new Map()
 
   subs.forEach(sub => {
+    html += buildSubCardHtml(sub, renewGridHtml, noticesBySubId)
+  })
+
+  html += '</div>'
+  panel.innerHTML = html
+
+  function applySubscriptionFilters() {
+    const rawQ = panel.querySelector('#dashSubSearch')?.value || ''
+    const q = rawQ.trim().toLowerCase().replace(/^#/, '').replace(/-/g, '')
+    const st = panel.querySelector('#dashSubFilterStatus')?.value || 'all'
+    const sv = panel.querySelector('#dashSubFilterService')?.value || 'all'
+    const listEl = panel.querySelector('#dashSubList')
+    const cards = listEl ? listEl.querySelectorAll(':scope > .sub-card') : []
+    let visible = 0
+    cards.forEach((card) => {
+      const id = card.dataset.subId
+      const sub = subs.find((s) => s.id === id)
+      if (!sub) {
+        card.style.display = 'none'
+        return
+      }
+      const plan = sub.plans || {}
+      const service = String(plan.service || 'netflix').toLowerCase()
+      const svcName = String(plan.name || planLabel(sub.plan) || '').toLowerCase()
+      const code = String(id).replace(/-/g, '').substring(0, 8).toLowerCase()
+      const planSlug = String(sub.plan || '').toLowerCase()
+      const idNorm = String(id).replace(/-/g, '').toLowerCase()
+      const expired = subscriptionAccessExpired(sub)
+
+      let okStatus = true
+      if (st === 'active') okStatus = sub.status === 'active' && !expired
+      else if (st === 'expired') okStatus = sub.status === 'expired' || expired
+      else if (st === 'pending') okStatus = sub.status === 'pending'
+      else if (st === 'processing') okStatus = sub.status === 'processing'
+      else if (st === 'cancelled') okStatus = sub.status === 'cancelled'
+
+      const okService = sv === 'all' || service === sv
+
+      const hay = code + ' ' + svcName + ' ' + service + ' ' + planSlug + ' ' + idNorm
+      const okSearch = !q || hay.includes(q)
+
+      const show = okStatus && okService && okSearch
+      card.style.display = show ? '' : 'none'
+      if (show) visible++
+    })
+    const emptyF = panel.querySelector('#dashSubEmptyFiltered')
+    const meta = panel.querySelector('#dashSubFilterMeta')
+    const total = subs.length
+    if (emptyF) emptyF.style.display = visible === 0 && total > 0 ? 'block' : 'none'
+    if (meta) {
+      const plain = !q && st === 'all' && sv === 'all'
+      meta.textContent = plain ? (total + ' đơn') : ('Hiển thị ' + visible + ' / ' + total + ' đơn')
+    }
+  }
+
+  const inp = panel.querySelector('#dashSubSearch')
+  const selSt = panel.querySelector('#dashSubFilterStatus')
+  const selSv = panel.querySelector('#dashSubFilterService')
+  const stOk = ['all', 'active', 'expired', 'pending', 'processing', 'cancelled'].includes(fs0.status)
+  if (selSt && stOk) selSt.value = fs0.status
+  if (selSv && (fs0.service === 'all' || serviceSet.has(fs0.service))) selSv.value = fs0.service
+
+  const persistAndApply = () => {
+    saveDashSubFilters({
+      q: inp?.value || '',
+      status: selSt?.value || 'all',
+      service: selSv?.value || 'all'
+    })
+    applySubscriptionFilters()
+  }
+  inp?.addEventListener('input', persistAndApply)
+  selSt?.addEventListener('change', persistAndApply)
+  selSv?.addEventListener('change', persistAndApply)
+  applySubscriptionFilters()
+
+  // ===== COPY =====
+  panel.querySelectorAll('.btn-copy').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.copy)
+      const orig = btn.textContent
+      btn.textContent = '&#x2705;'
+      setTimeout(() => btn.textContent = orig, 1500)
+    })
+  })
+
+  // ===== TOGGLE PASSWORD =====
+  panel.querySelectorAll('.btn-toggle-pass').forEach(btn => {
+    let shown = false
+    btn.addEventListener('click', () => {
+      shown = !shown
+      const el = panel.querySelector('#pass-' + btn.dataset.sub)
+      const pass = decodeURIComponent(btn.dataset.pass)
+      el.textContent = shown ? pass : maskPassword(pass)
+      btn.textContent = shown ? '&#x1F648;' : '&#x1F441;&#xFE0F;'
+    })
+  })
+
+  // ===== GET LOGIN LINK =====
+  panel.querySelectorAll('.acc-get-link-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const subId = btn.dataset.sub
+      const cookie = decodeURIComponent(btn.dataset.cookie)
+      const resultEl = panel.querySelector('#result-link-' + subId)
+
+      if (!cookie) {
+        showResult(resultEl, 'error', '&#x274C; Tài khoản này chỉ có email/mật khẩu, không có cookie Netflix.')
+        return
+      }
+
+      const stLink = planCheckBySub.get(subId)
+      if (stLink && stLink.alive === false) {
+        showResult(resultEl, 'error', '&#x274C; <strong>Không thể xem / lấy link:</strong> cookie Netflix đã hết hiệu lực. Bấm <strong>Bảo hành</strong>.')
+        return
+      }
+      if (stLink && stLink.hasPremium === false) {
+        showResult(resultEl, 'error', '&#x274C; <strong>Không thể xem / lấy link:</strong> tài khoản không còn gói Premium. Bấm <strong>Bảo hành</strong>.')
+        return
+      }
+
+      showResult(resultEl, 'loading', '&#x23F3; Đang lấy login link...')
+      btn.disabled = true
+
+      try {
+        const res = await apiGetLink(cookie)
+        if (res.success && res.link) {
+          resultEl.innerHTML = '<div class="result-success"><div class="result-title">&#x2705; Login Link của bạn:</div><div class="result-link-row"><input type="text" value="' + res.link + '" readonly class="result-link-input" id="final-link-' + subId + '"><button class="btn btn-sm btn-primary copy-final-link" data-link="' + res.link + '">&#x1F4CB; Copy</button></div><a href="' + res.link + '" target="_blank" rel="noopener" class="btn btn-sm btn-outline" style="margin-top:8px;display:inline-block;">&#x1F680; Mở link đăng nhập</a></div>'
+          resultEl.style.display = 'block'
+          resultEl.querySelector('.copy-final-link')?.addEventListener('click', e => {
+            navigator.clipboard.writeText(e.target.dataset.link)
+            e.target.textContent = '&#x2705; Copied!'
+            setTimeout(() => e.target.textContent = '&#x1F4CB; Copy', 2000)
+          })
+        } else {
+          showResult(resultEl, 'error', '&#x274C; ' + (res.message || 'Cookie die hoặc không hợp lệ'))
+        }
+      } catch (err) {
+        showResult(resultEl, 'error', '&#x274C; Lỗi kết nối: ' + err.message)
+      } finally {
+        const st = planCheckBySub.get(subId)
+        const stillBlocked = st && (st.alive === false || st.hasPremium === false)
+        btn.disabled = !!stillBlocked
+      }
+    })
+  })
+
+  // ===== TV LOGIN =====
+  function clearTvSession(subId) {
+    const submitBtn = panel.querySelector('.acc-tv-submit-btn[data-sub="' + subId + '"]')
+    if (!submitBtn) return
+    delete submitBtn.dataset.authUrl
+    delete submitBtn.dataset.cookie
+  }
+
+  panel.querySelectorAll('.acc-tv-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const subId = btn.dataset.sub
+      let cookie
+      try { cookie = decodeURIComponent(btn.dataset.cookie || '') } catch { cookie = '' }
+      const tvBox = panel.querySelector('#tv-box-' + subId)
+      const resultEl = panel.querySelector('#result-tv-' + subId)
+      if (!tvBox || !resultEl) return
+
+      if (!cookie) {
+        tvBox.style.display = 'block'
+        clearTvSession(subId)
+        showResult(resultEl, 'error', '&#x274C; Tài khoản này không có cookie Netflix.')
+        return
+      }
+
+      if (tvBox.style.display !== 'none') {
+        tvBox.style.display = 'none'
+        clearTvSession(subId)
+        return
+      }
+
+      const stTv = planCheckBySub.get(subId)
+      if (stTv && stTv.alive === false) {
+        tvBox.style.display = 'block'
+        clearTvSession(subId)
+        showResult(resultEl, 'error', '&#x274C; Cookie đã hết hiệu lực. Bấm <strong>Bảo hành</strong> trước.')
+        return
+      }
+
+      tvBox.style.display = 'block'
+      clearTvSession(subId)
+      btn.disabled = true
+      btn.textContent = '&#x23F3;'
+      showResult(resultEl, 'loading', '&#x23F3; Đang kết nối Netflix...')
+
+      try {
+        const init = await apiTvInit(cookie)
+        if (!init.success) {
+          showResult(resultEl, 'error', '&#x274C; ' + (init.message || 'Không khởi tạo được phiên TV'))
+          return
+        }
+        const authUrl = init.authUrl
+        if (!authUrl || typeof authUrl !== 'string') {
+          showResult(resultEl, 'error', '&#x274C; Server không trả về authURL hợp lệ.')
+          return
+        }
+        const submitBtn = panel.querySelector('.acc-tv-submit-btn[data-sub="' + subId + '"]')
+        if (submitBtn) {
+          submitBtn.dataset.authUrl = authUrl
+          submitBtn.dataset.cookie = encodeURIComponent(cookie)
+        }
+        showResult(resultEl, 'success', '&#x2705; Đã kết nối Netflix. Nhập mã trên TV vào ô bên dưới rồi bấm Gửi mã.')
+      } catch (err) {
+        showResult(resultEl, 'error', '&#x274C; Lỗi: ' + err.message)
+      } finally {
+        const st = planCheckBySub.get(subId)
+        const stillBlocked = st && (st.alive === false || st.hasPremium === false)
+        btn.disabled = !!stillBlocked
+        btn.textContent = '&#x1F4FA; Nhập mã TV'
+      }
+    })
+  })
+
+  panel.querySelectorAll('.acc-tv-cancel-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const subId = btn.dataset.sub
+      const tvBox = panel.querySelector('#tv-box-' + subId)
+      if (tvBox) tvBox.style.display = 'none'
+      clearTvSession(subId)
+    })
+  })
+
+  panel.querySelectorAll('.acc-tv-submit-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const subId = btn.dataset.sub
+      const authUrl = btn.dataset.authUrl
+      const cookieEnc = btn.dataset.cookie
+      const resultEl = panel.querySelector('#result-tv-' + subId)
+      const codeInput = panel.querySelector('#tv-code-' + subId)
+
+      if (!authUrl || !cookieEnc) {
+        showResult(resultEl, 'error', '&#x274C; Chưa khởi tạo phiên TV. Bấm nút TV trước.')
+        return
+      }
+      const code = codeInput?.value?.trim()
+      if (!code || !/^\d{6,10}$/.test(code)) {
+        showResult(resultEl, 'error', '&#x274C; Mã TV phải là 6-10 chữ số.')
+        return
+      }
+      const cookie = decodeURIComponent(cookieEnc)
+      btn.disabled = true
+      showResult(resultEl, 'loading', '&#x23F3; Đang gửi mã vào Netflix...')
+
+      try {
+        const res = await apiTvSubmit(cookie, authUrl, code)
+        if (res.success) {
+          showResult(resultEl, 'success', '&#x1F389; ' + (res.message || 'TV đã được đăng nhập!'))
+          if (codeInput) codeInput.value = ''
+          setTimeout(() => {
+            clearTvSession(subId)
+            const box = panel.querySelector('#tv-box-' + subId)
+            if (box) box.style.display = 'none'
+          }, 3000)
+        } else {
+          showResult(resultEl, 'error', '&#x274C; ' + (res.message || 'Netflix từ chối mã'))
+        }
+      } catch (err) {
+        showResult(resultEl, 'error', '&#x274C; Lỗi: ' + err.message)
+      } finally {
+        btn.disabled = false
+      }
+    })
+  })
+
+  // ===== AUTO CHECK PLAN STATUS =====
+  panel.querySelectorAll('.acc-warranty-btn').forEach(btn => {
+    const subId  = btn.dataset.sub
+    const cookie = decodeURIComponent(btn.dataset.cookie)
+    const planStatusEl = panel.querySelector('#plan-status-' + subId)
+    if (!cookie || !planStatusEl) { if (planStatusEl) planStatusEl.innerHTML = ''; return }
+
+    setTimeout(async () => {
+      try {
+        const check = await apiCheckPlanStatus(cookie)
+
+        if (!check.alive) {
+          planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--dead">&#x274C; Cookie đã die - đang tự động đổi tài khoản...</div>'
+          planCheckBySub.set(subId, { alive: false, hasPremium: false, paymentError: false })
+          await triggerWarranty(subId, cookie, panel, renewPlans, 'cookie_dead')
+          return
+        }
+
+        if (!check.hasPremium) {
+          planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--noPlan">&#x26A0;&#xFE0F; Mất gói Premium - đang tự động đổi tài khoản...</div>'
+          planCheckBySub.set(subId, { alive: true, hasPremium: false, paymentError: false })
+          await triggerWarranty(subId, cookie, panel, renewPlans, 'plan_lost')
+          return
+        }
+
+        let paymentError = hasPaymentIssue(check) || hasPaymentIssue(check.raw)
+        let deepPlan = check.plan || 'Premium'
+
+        if (!paymentError) {
+          try {
+            const acct = await apiNetflixAccountInfo(cookie)
+            if (hasPaymentIssue(acct)) {
+              paymentError = true
+              if (acct.plan) deepPlan = acct.plan
+            }
+          } catch { /* ignore */ }
+        }
+
+        if (paymentError) {
+          planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--paymentError">&#x1F6AB; <strong>Lỗi thanh toán</strong> - tài khoản bị hold, đang tự động đổi tài khoản mới...</div>'
+          planCheckBySub.set(subId, { alive: true, hasPremium: true, paymentError: true })
+          await triggerWarranty(subId, cookie, panel, renewPlans, 'payment_error')
+          return
+        }
+
+        planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--ok">&#x2705; Gói: <strong>' + deepPlan + '</strong>' + (check.screens ? ' &middot; ' + check.screens + ' màn hình' : '') + '</div>'
+        planCheckBySub.set(subId, { alive: true, hasPremium: true, paymentError: false })
+        const getLinkBtn = panel.querySelector('.acc-get-link-btn[data-sub="' + subId + '"]')
+        const tvBtnEl = panel.querySelector('.acc-tv-btn[data-sub="' + subId + '"]')
+        for (const b of [getLinkBtn, tvBtnEl]) {
+          if (!b) continue
+          b.disabled = false
+          b.removeAttribute('title')
+          b.classList.remove('acc-action-needs-warranty')
+        }
+      } catch {
+        planStatusEl.innerHTML = ''
+      }
+    }, 1200)
+  })
+
+  async function submitViewerReport(subId, panel) {
+    const resultEl = panel.querySelector('#result-warranty-' + subId)
+    const reportBtn = panel.querySelector('.acc-report-view-btn[data-sub="' + subId + '"]')
+    if (reportBtn) reportBtn.disabled = true
+    try {
+      showResult(resultEl, 'loading', '\u23f3 \u0110ang g\u1eedi b\u00e1o t\u1edbi admin...')
+      await reportCannotViewToAdmin(subId)
+      showResult(resultEl, 'success', '\u2705 \u0110\u00e3 g\u1eedi b\u00e1o cho admin. Admin s\u1ebd ki\u1ec3m tra th\u1ee7 c\u00f4ng.<br><small>N\u1ebfu <strong>cookie die</strong> ho\u1eb7c <strong>m\u1ea5t Premium</strong>, d\u00f9ng <strong>B\u1ea3o h\u00e0nh</strong> \u0111\u1ec3 h\u1ec7 th\u1ed1ng t\u1ef1 \u0111\u1ed5i.</small>')
+    } catch (err) {
+      showResult(resultEl, 'error', '\u274c ' + err.message)
+    } finally {
+      if (reportBtn) reportBtn.disabled = false
+    }
+  }
+
+  async function triggerWarranty(subId, cookie, panel, renewPlans, preReason) {
+    const resultEl = panel.querySelector('#result-warranty-' + subId)
+    const warrantyBtn = panel.querySelector('.acc-warranty-btn[data-sub="' + subId + '"]')
+    if (warrantyBtn) warrantyBtn.disabled = true
+
+    try {
+      let reason = preReason || 'unknown'
+
+      if (!preReason && cookie) {
+        showResult(resultEl, 'loading', '\u23f3 \u0110ang ki\u1ec3m tra t\u00ecnh tr\u1ea1ng t\u00e0i kho\u1ea3n...')
+        try {
+          const check = await apiCheckPlanStatus(cookie)
+          if (check.alive && check.hasPremium) {
+            let payErr = hasPaymentIssue(check) || hasPaymentIssue(check.raw)
+            if (!payErr) {
+              try {
+                const acct = await apiNetflixAccountInfo(cookie)
+                payErr = hasPaymentIssue(acct)
+              } catch {}
+            }
+            if (!payErr) {
+              showResult(resultEl, 'success', '\u2705 T\u00e0i kho\u1ea3n OK \u2014 g\u00f3i ' + (check.plan || 'Premium') + ' \u0111ang ho\u1ea1t \u0111\u1ed9ng b\u00ecnh th\u01b0\u1eddng.')
+              if (warrantyBtn) warrantyBtn.disabled = false
+              return
+            }
+            reason = 'payment_error'
+          } else {
+            reason = check.reason || (!check.alive ? 'cookie_dead' : 'plan_lost')
+          }
+        } catch {}
+      }
+
+      const reasonMsg = reason === 'payment_error'
+        ? '\u23f3 Ph\u00e1t hi\u1ec7n l\u1ed7i thanh to\u00e1n. \u0110ang \u0111\u1ed5i t\u00e0i kho\u1ea3n m\u1edbi...'
+        : reason === 'plan_lost'
+          ? '\u23f3 Ph\u00e1t hi\u1ec7n m\u1ea5t g\u00f3i Premium. \u0110ang \u0111\u1ed5i t\u00e0i kho\u1ea3n m\u1edbi...'
+          : '\u23f3 Cookie \u0111\u00e3 die. \u0110ang x\u1eed l\u00fd b\u1ea3o h\u00e0nh...'
+      showResult(resultEl, 'loading', reasonMsg)
+
+      const warranty = await claimWarranty(subId)
+
+      if (warranty && warranty.success) {
+        const u = getUser()
+        if (u) {
+          const [fresh, nm] = await Promise.all([getUserSubscriptions(u.id), fetchViewerNoticesBySubId()])
+          renderSubscriptions(panel, fresh, renewPlans, nm)
+        } else {
+          showResult(resultEl, 'success', '\u2705 \u0110\u00e3 \u0111\u1ed5i t\u00e0i kho\u1ea3n. Vui l\u00f2ng t\u1ea3i l\u1ea1i trang.')
+        }
+      } else {
+        showResult(resultEl, 'error', '\u274c ' + (warranty?.message || 'Kh\u00f4ng th\u1ec3 b\u1ea3o h\u00e0nh. Vui l\u00f2ng li\u00ean h\u1ec7 admin.'))
+      }
+    } catch (err) {
+      showResult(resultEl, 'error', '\u274c L\u1ed7i: ' + err.message)
+    } finally {
+      if (warrantyBtn) warrantyBtn.disabled = false
+    }
+  }
+
+  panel.querySelectorAll('.acc-warranty-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      triggerWarranty(btn.dataset.sub, decodeURIComponent(btn.dataset.cookie), panel, renewPlans)
+    })
+  })
+
+  panel.querySelectorAll('.acc-report-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      submitViewerReport(btn.dataset.sub, panel)
+    })
+  })
+}
+
+
+
+  function buildSubCardHtml(sub, renewGridHtml, noticesBySubId) {
     const days = daysLeft(sub.end_at)
     const plan = sub.plans || {}
     const service = plan.service || 'netflix'
@@ -312,169 +807,353 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     const isManual  = fulfillment === 'manual'
     const isStock   = fulfillment === 'stock'
     const isActive  = sub.status === 'active'
+    const isProcessing = sub.status === 'processing'
     const expired   = subscriptionAccessExpired(sub)
 
-    // Netflix: cần parse account từ login_link
     const hasAccount = isNetflix && isActive && sub.login_link && !expired
     const acc = hasAccount ? parseAccount(sub.login_link) : null
     const cookie = acc ? (acc.cookie || '') : ''
     const vrRejected = noticesBySubId.get(sub.id)
-
-    // Non-Netflix: nội dung giao trong login_link
     const deliveredContent = !isNetflix && sub.login_link ? sub.login_link : null
+    const planDescription = String(
+      plan.description ||
+      plan.shortDescription ||
+      plan.longDescription ||
+      plan.instructions ||
+      ''
+    ).trim()
+    const guideText = String(
+      plan.usage_guide ||
+      plan.guide ||
+      plan.instruction ||
+      plan.instructions ||
+      plan.admin_note ||
+      ''
+    ).trim()
 
     const cardClass = (isActive && !expired)
       ? 'sub-card sub-card--active'
       : (sub.status === 'expired' || expired) ? 'sub-card sub-card--expired'
-      : sub.status === 'pending' ? 'sub-card sub-card--pending'
+      : (sub.status === 'pending' || isProcessing) ? 'sub-card sub-card--pending'
       : 'sub-card'
 
-    // Service label
     const svcName = plan.name || planLabel(sub.plan)
-
     const orderCode = sub.id ? '#' + sub.id.replace(/-/g,'').substring(0,8).toUpperCase() : ''
+    const badgeService = !isNetflix
+      ? '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(66,133,244,0.12);color:#4285f4;margin-left:4px;text-transform:uppercase;">' + (isStock ? 'Sản phẩm cấp sẵn' : 'Dịch vụ') + '</span>'
+      : '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(229,9,20,0.12);color:#E50914;margin-left:4px;">Netflix Auto</span>'
 
-    html += `
-    <div class="${cardClass}" data-sub-id="${sub.id}" data-plan="${escapeAttr(sub.plan || '')}">
-      <div class="sub-header">
-        <div>
-          <span class="sub-plan">${svcName}</span>
-          ${orderCode ? `<span class="sub-order-code">${orderCode}</span>` : ''}
-        </div>
-        <span class="status-badge ${statusClass(sub.status)}">${statusLabel(sub.status)}</span>
-      </div>
-      <div class="sub-details">
-        <div class="sub-detail"><span class="label">Dịch vụ:</span><span style="text-transform:capitalize;">${service}</span></div>
-        <div class="sub-detail"><span class="label">Giá:</span><span>${formatVND(plan.price || 0)}</span></div>
-        ${sub.start_at ? `<div class="sub-detail"><span class="label">Bắt đầu:</span><span>${formatDate(sub.start_at)}</span></div>` : ''}
-        ${sub.end_at ? `
-          <div class="sub-detail"><span class="label">Hết hạn:</span><span>${formatDate(sub.end_at)}</span></div>
-          <div class="sub-detail"><span class="label">Còn lại:</span>
-            <span class="${days !== null && days <= 3 ? 'text-danger' : 'text-success'}">${days ?? '—'} ngày</span>
-          </div>` : ''}
-        <div class="sub-detail"><span class="label">Tạo lúc:</span><span>${formatDate(sub.created_at)}</span></div>
-      </div>
+    let cardHtml = '<div class="' + cardClass + '" data-sub-id="' + sub.id + '" data-plan="' + escapeAttr(sub.plan || '') + '">'
 
-      ${/* ── Non-Netflix: Manual service ── */ ''}
-      ${!isNetflix && isManual ? `
-      <div class="account-section">
-        ${sub.status === 'pending' ? `
-          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:14px 16px;">
-            <p style="font-weight:700;color:#92400e;margin:0 0 6px;">⏳ Đang chờ admin xử lý</p>
-            <p style="font-size:13px;color:#78350f;margin:0;">Admin sẽ xử lý đơn của bạn trong thời gian sớm nhất.</p>
-          </div>
-        ` : sub.status === 'active' ? `
-          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:14px 16px;">
-            <p style="font-weight:700;color:#15803d;margin:0 0 6px;">✅ Đã xử lý</p>
-            ${sub.notes ? `<p style="font-size:13px;color:#166534;margin:0;">${sub.notes}</p>` : ''}
+    // ── Header ──
+    cardHtml += '<div class="sub-header">'
+    cardHtml += '<div>'
+    cardHtml += '<span class="sub-plan">' + svcName + '</span>'
+    if (orderCode) cardHtml += '<span class="sub-order-code">' + orderCode + '</span>'
+    cardHtml += badgeService
+    cardHtml += '</div>'
+    cardHtml += '<span class="status-badge ' + statusClass(sub.status) + '">' + statusLabel(sub.status) + '</span>'
+    cardHtml += '</div>'
+
+    // ── Details ──
+    cardHtml += '<div class="sub-details">'
+    cardHtml += '<div class="sub-detail"><span class="label">Dịch vụ:</span><span style="text-transform:capitalize;">' + service + '</span></div>'
+    cardHtml += '<div class="sub-detail"><span class="label">Giá:</span><span>' + formatVND(plan.price || 0) + '</span></div>'
+    if (sub.start_at) cardHtml += '<div class="sub-detail"><span class="label">Bắt đầu:</span><span>' + formatDate(sub.start_at) + '</span></div>'
+    if (sub.end_at) {
+      cardHtml += '<div class="sub-detail"><span class="label">Hết hạn:</span><span>' + formatDate(sub.end_at) + '</span></div>'
+      const dangerCls = (days !== null && days <= 3) ? 'text-danger' : 'text-success'
+      cardHtml += '<div class="sub-detail"><span class="label">Còn lại:</span><span class="' + dangerCls + '">' + (days !== null ? days : '—') + ' ngày</span></div>'
+    }
+    cardHtml += '<div class="sub-detail"><span class="label">Tạo lúc:</span><span>' + formatDate(sub.created_at) + '</span></div>'
+    cardHtml += '</div>'
+
+    // ── Manual service block ──
+    if (!isNetflix && isManual) {
+      cardHtml += '<div class="dash-premium-acc-box">'
+      if (sub.status === 'pending' || isProcessing) {
+        cardHtml += '<div class="dash-premium-pending"><div class="pending-icon-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin-slow"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg></div><div class="pending-text"><h4>Đang chờ admin xác nhận</h4><p>Đơn dịch vụ đã ghi nhận. Admin sẽ xác nhận hoặc từ chối nếu đơn không thành công.</p></div></div>'
+      } else if (sub.status === 'active') {
+        cardHtml += '<div style="display:flex;flex-direction:column;gap:12px;">'
+        if (sub.login_link) {
+          cardHtml += '<div class="premium-card premium-card--delivered">'
+          cardHtml += '<div class="premium-card-header"><div class="premium-card-title"><span class="icon">&#x1F4E6;</span><span>Nội dung giao hàng</span></div><span class="premium-badge premium-badge--success">&#x2705; Đã giao</span></div>'
+          cardHtml += '<div class="premium-card-body"><div class="content-display-box"><pre>' + escHtml(sub.login_link) + '</pre>'
+          cardHtml += '<button class="premium-copy-btn btn-copy" data-copy="' + escapeAttr(sub.login_link) + '" title="Copy nội dung"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><span>Sao chép</span></button>'
+          cardHtml += '</div></div></div>'
+        } else {
+          cardHtml += '<div class="dash-premium-pending"><div class="pending-text"><p style="margin:0;font-size:14px;"><span class="link-pulse"></span> Đang chuẩn bị nội dung giao hàng...</p></div></div>'
+        }
+        if (sub.admin_note) {
+          cardHtml += '<div class="premium-card premium-card--note"><div class="premium-card-header"><div class="premium-card-title"><span class="icon">&#x1F4AC;</span><span>Lời nhắn từ Shop</span></div></div><div class="premium-card-body"><p class="admin-message">' + escHtml(sub.admin_note) + '</p></div></div>'
+        }
+        cardHtml += '</div>'
+      }
+      cardHtml += '</div>'
+    }
+
+    // ── Stock product block ──
+    if (!isNetflix && isStock) {
+      cardHtml += '<div class="dash-premium-acc-box">'
+      if (deliveredContent) {
+        cardHtml += '<div class="premium-card premium-card--delivered"><div class="premium-card-header"><div class="premium-card-title"><span class="icon">&#x1F4E6;</span><span>Nội dung sản phẩm</span></div></div>'
+        cardHtml += '<div class="premium-card-body"><div class="content-display-box"><pre>' + deliveredContent + '</pre>'
+        cardHtml += '<button class="premium-copy-btn btn-copy" data-copy="' + escapeAttr(deliveredContent) + '" title="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><span>Sao chép</span></button>'
+        cardHtml += '</div></div></div>'
+        if (planDescription || guideText || sub.admin_note) {
+          cardHtml += '<div class="premium-card premium-card--note"><div class="premium-card-header"><div class="premium-card-title"><span class="icon">&#x1F4D8;</span><span>Hướng dẫn sử dụng</span></div></div><div class="premium-card-body">'
+          if (planDescription) cardHtml += '<p class="admin-message">' + escHtml(planDescription) + '</p>'
+          if (guideText) cardHtml += '<p class="admin-message">' + escHtml(guideText) + '</p>'
+          if (sub.admin_note) cardHtml += '<p class="admin-message">' + escHtml(sub.admin_note) + '</p>'
+          cardHtml += '</div></div>'
+        }
+      } else if (sub.status === 'pending' || isProcessing || sub.status === 'active') {
+        cardHtml += '<div class="dash-premium-pending"><div class="pending-icon-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin-slow"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg></div><div class="pending-text"><h4>Đang chuẩn bị sản phẩm</h4><p>Sản phẩm sẽ được giao tự động hoặc bởi admin.</p></div></div>'
+      }
+      cardHtml += '</div>'
+    }
+
+    // ── Netflix account info block ──
+    if (hasAccount && acc) {
+      cardHtml += '<div class="dash-premium-acc-box"><div class="premium-card">'
+      cardHtml += '<div class="premium-card-header" style="background:rgba(229,9,20,0.05);"><div class="premium-card-title"><span class="icon" style="color:#E50914;background:rgba(229,9,20,0.15);border:1px solid rgba(229,9,20,0.2)">&#x1F3AC;</span><span>Thông tin tài khoản Netflix</span></div>'
+      if (sub.end_at) cardHtml += '<span class="premium-badge" style="background:rgba(255,255,255,0.08);color:#cbd5e1;border:1px solid rgba(255,255,255,0.15)">Hết hạn: ' + formatDate(sub.end_at) + '</span>'
+      cardHtml += '</div>'
+      cardHtml += '<div class="premium-card-body">'
+      if (sub.end_at) cardHtml += '<div class="account-validity-banner" style="margin-bottom:16px;">Các nút <strong>Get link</strong>, <strong>TV</strong>, <strong>Bảo hành</strong> dùng được trong thời gian này.</div>'
+      if (vrRejected) {
+        cardHtml += '<div class="viewer-report-user-notice" role="status"><strong>Phan hoi tu shop</strong><p class="viewer-report-user-notice__text">' + escHtml(vrRejected.admin_note) + '</p>'
+        if (vrRejected.resolved_at) cardHtml += '<p class="viewer-report-user-notice__meta">' + formatDate(vrRejected.resolved_at) + '</p>'
+        cardHtml += '</div>'
+      }
+      cardHtml += '<div style="display:flex;flex-direction:column;">'
+      if (acc.email) cardHtml += '<div class="premium-acc-row"><span class="premium-acc-label">Email</span><span class="premium-acc-val">' + acc.email + '</span><button class="premium-copy-btn btn-copy" data-copy="' + acc.email + '" title="Copy" style="padding:4px 8px;font-size:11px;">&#x1F4CB; Copy</button></div>'
+      if (acc.password) cardHtml += '<div class="premium-acc-row"><span class="premium-acc-label">Mật khẩu</span><span class="premium-acc-val acc-pass-masked" id="pass-' + sub.id + '">' + maskPassword(acc.password) + '</span><button class="premium-copy-btn btn-toggle-pass acc-icon-btn" data-sub="' + sub.id + '" data-pass="' + encodeURIComponent(acc.password) + '" title="Hiện/Ẩn" style="padding:4px 8px;font-size:11px;">&#x1F441;&#xFE0F; Ẩn/Hiện</button><button class="premium-copy-btn btn-copy" data-copy="' + acc.password + '" title="Copy" style="padding:4px 8px;font-size:11px;">&#x1F4CB; Copy</button></div>'
+      cardHtml += '</div>'
+      cardHtml += '<div class="acc-plan-status" id="plan-status-' + sub.id + '" style="margin:12px 0;"><span class="acc-plan-checking">&#x23F3; Đang kiểm tra gói...</span></div>'
+      cardHtml += '<div class="premium-actions-row">'
+      cardHtml += '<button class="btn btn-sm btn-primary acc-get-link-btn" data-sub="' + sub.id + '" data-cookie="' + encodeURIComponent(cookie) + '" style="background:linear-gradient(135deg,#E50914 0%,#B80710 100%)">&#x1F517; Get Login Link</button>'
+      cardHtml += '<button class="btn btn-sm btn-outline acc-tv-btn" data-sub="' + sub.id + '" data-cookie="' + encodeURIComponent(cookie) + '">&#x1F4FA; Nhập mã TV</button>'
+      cardHtml += '<button class="btn btn-sm btn-warning acc-warranty-btn" data-sub="' + sub.id + '" data-cookie="' + encodeURIComponent(cookie) + '" title="Cookie die hoặc mất Premium">&#x1F527; Bảo hành</button>'
+      cardHtml += '<button type="button" class="btn btn-sm btn-outline acc-report-view-btn" data-sub="' + sub.id + '" data-cookie="' + encodeURIComponent(cookie) + '" title="Vẫn không xem được dù tài khoản OK">&#x1F6A8; Báo lỗi</button>'
+      cardHtml += '</div>'
+      cardHtml += '<div class="acc-result-box" id="result-link-' + sub.id + '" style="display:none;margin-top:16px;"></div>'
+      cardHtml += '<div class="tv-login-box" id="tv-box-' + sub.id + '" style="display:none;margin-top:16px;"><div class="acc-result-box tv-login-status" id="result-tv-' + sub.id + '" style="display:none;" aria-live="polite"></div><div class="tv-login-body"><p class="tv-instruction">Nhập mã số hiển thị trên TV Netflix (6-10 chữ số).</p><div class="tv-input-row"><input type="text" class="tv-code-input" id="tv-code-' + sub.id + '" placeholder="32148294" maxlength="10" inputmode="numeric" autocomplete="one-time-code"><div class="tv-actions"><button type="button" class="btn btn-primary acc-tv-submit-btn" data-sub="' + sub.id + '">Gửi mã</button><button type="button" class="btn btn-outline acc-tv-cancel-btn" data-sub="' + sub.id + '">Hủy</button></div></div></div></div>'
+      cardHtml += '<div class="acc-result-box" id="result-warranty-' + sub.id + '" style="display:none;margin-top:16px;"></div>'
+      cardHtml += '</div></div></div>'
+    }
+
+    // ── Expired block ──
+    if (expired) {
+      cardHtml += '<div class="sub-expired-box"><h4>Gói đã hết hạn</h4><p class="sub-expired-lead">Đăng nhập đã ẩn. Chọn gói gia hạn để nhận tài khoản sau thanh toán.</p>' + renewGridHtml + '<p class="sub-expired-hint">Nếu không gia hạn, slot share được hệ thống tự giải phóng sau ngày hết hạn.</p></div>'
+    }
+
+    // ── Netflix pending auto-assign ──
+    if (isActive && isNetflix && !sub.login_link && !expired) {
+      cardHtml += '<div class="acc-pending-notice" id="pending-notice-' + sub.id + '"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;"><span style="display:flex;align-items:center;gap:8px;"><span class="link-pulse"></span> Tài khoản Netflix đang được chuẩn bị — hệ thống sẽ tự gán trong ít phút...</span></div><div style="font-size:12px;margin-top:6px;color:var(--warning);opacity:.75;">Tự động kiểm tra mỗi 20 giây</div></div>'
+    }
+
+    // ── Payment pending countdown ──
+    if (sub.status === 'pending' && !isProcessing) {
+      const CANCEL_AFTER_MS = 30 * 60 * 1000
+      const createdMs = sub.created_at ? new Date(sub.created_at).getTime() : Date.now()
+      const remainingMs = Math.max(0, createdMs + CANCEL_AFTER_MS - Date.now())
+      const remainingMin = Math.floor(remainingMs / 60000)
+      const remainingSec = Math.floor((remainingMs % 60000) / 1000)
+      const isExpiring = remainingMin < 5
+      const urgentCls = isExpiring ? ' acc-pending-countdown--urgent' : ''
+      cardHtml += '<div class="acc-pending-notice" id="pending-notice-' + sub.id + '"><div class="acc-pending-main">&#x23F3; Đang chờ xác nhận thanh toán từ ngân hàng...</div>'
+      if (remainingMs > 0) {
+        cardHtml += '<div class="acc-pending-countdown' + urgentCls + '" id="countdown-' + sub.id + '" data-deadline="' + (createdMs + CANCEL_AFTER_MS) + '">'
+        cardHtml += (isExpiring ? '&#x26A0;&#xFE0F;' : '&#x1F550;') + ' Tu huy sau: <strong id="cdt-' + sub.id + '">' + remainingMin + ':' + String(remainingSec).padStart(2,'0') + '</strong></div>'
+      } else {
+        cardHtml += '<div class="acc-pending-countdown acc-pending-countdown--urgent">&#x26A0;&#xFE0F; Đơn này sẽ bị hủy ngay — vui lòng liên hệ admin nếu đã chuyển tiền.</div>'
+      }
+      cardHtml += '</div>'
+    }
+
+    cardHtml += '</div>'
+    return cardHtml
+  }
+/*
+  subs.forEach(sub => {
+    html += buildSubCardHtml(sub, renewGridHtml, noticesBySubId)
+  })
+
+
+            ${sub.login_link ? `
+              <div class="premium-card premium-card--delivered">
+                <div class="premium-card-header">
+                  <div class="premium-card-title">
+                    <span class="icon">📦</span>
+                    <span>Nội dung giao hàng</span>
+                  </div>
+                  <span class="premium-badge premium-badge--success">✅ Đã giao</span>
+                </div>
+                <div class="premium-card-body">
+                  <div class="content-display-box">
+                    <pre>${escHtml(sub.login_link)}</pre>
+                    <button class="premium-copy-btn btn-copy" data-copy="${escapeAttr(sub.login_link)}" title="Copy nội dung">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                      <span>Sao chép</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ` : `
+               <div class="dash-premium-pending">
+                  <div class="pending-text">
+                    <p style="margin:0;font-size:14px;"><span class="link-pulse"></span> Đang chuẩn bị nội dung giao hàng...</p>
+                  </div>
+               </div>
+            `}
+            ${sub.admin_note ? `
+              <div class="premium-card premium-card--note">
+                <div class="premium-card-header">
+                  <div class="premium-card-title">
+                    <span class="icon">💬</span>
+                    <span>Lời nhắn từ Shop</span>
+                  </div>
+                </div>
+                <div class="premium-card-body">
+                  <p class="admin-message">${escHtml(sub.admin_note)}</p>
+                </div>
+              </div>
+            ` : ''}
           </div>
         ` : ''}
       </div>` : ''}
 
-      ${/* ── Non-Netflix: Stock product ── */ ''}
+
+      ${/* ── Non-Netflix: Stock product ── * / ''}
       ${!isNetflix && isStock ? `
-      <div class="account-section">
+      <div class="dash-premium-acc-box">
         ${deliveredContent ? `
-          <h4>📦 Nội dung sản phẩm</h4>
-          <div class="account-info-box">
-            <div class="acc-info-row">
-              <span class="acc-info-label">📋 Nội dung</span>
-              <span class="acc-info-val" style="word-break:break-all;font-family:var(--mono);font-size:12px;">${deliveredContent}</span>
-              <button class="btn-copy" data-copy="${deliveredContent}" title="Copy">📋</button>
+          <div class="premium-card premium-card--delivered">
+            <div class="premium-card-header">
+              <div class="premium-card-title">
+                <span class="icon">📦</span>
+                <span>Nội dung sản phẩm</span>
+              </div>
             </div>
-          </div>
-        ` : sub.status === 'pending' ? `
-          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:14px 16px;">
-            <p style="font-weight:700;color:#92400e;margin:0 0 6px;">⏳ Đang chuẩn bị sản phẩm</p>
-            <p style="font-size:13px;color:#78350f;margin:0;">Sản phẩm sẽ được giao tự động hoặc bởi admin.</p>
-          </div>
-        ` : ''}
-      </div>` : ''}
-
-      ${/* ── Netflix only ── */ ''}
-      ${hasAccount && acc ? `
-      <!-- ===== ACCOUNT INFO ===== -->
-      <div class="account-section">
-        <h4>🔐 Thông tin tài khoản Netflix</h4>
-        ${sub.end_at ? `
-        <div class="account-validity-banner">
-          📅 Gói đang hiệu lực đến <strong>${formatDate(sub.end_at)}</strong>${days !== null ? ` · còn <strong>${days}</strong> ngày` : ''}.
-          Các nút <strong>Get link</strong>, <strong>TV</strong>, <strong>Bảo hành</strong> dùng được trong thời gian này.
-        </div>` : ''}
-        ${vrRejected ? `
-        <div class="viewer-report-user-notice" role="status">
-          <strong>Phan hoi shop (bao khong xem duoc)</strong>
-          <p class="viewer-report-user-notice__text">${escHtml(vrRejected.admin_note)}</p>
-          ${vrRejected.resolved_at ? `<p class="viewer-report-user-notice__meta">${formatDate(vrRejected.resolved_at)}</p>` : ''}
-        </div>` : ''}
-        <div class="account-info-box">
-          ${acc.email ? `
-          <div class="acc-info-row">
-            <span class="acc-info-label">📧 Email</span>
-            <span class="acc-info-val">${acc.email}</span>
-            <button class="btn-copy" data-copy="${acc.email}" title="Copy">📋</button>
-          </div>` : ''}
-          ${acc.password ? `
-          <div class="acc-info-row">
-            <span class="acc-info-label">🔑 Mật khẩu</span>
-            <span class="acc-info-val acc-pass-masked" id="pass-${sub.id}">${maskPassword(acc.password)}</span>
-            <button class="btn-toggle-pass acc-icon-btn" data-sub="${sub.id}" data-pass="${encodeURIComponent(acc.password)}" title="Hiện/Ẩn">👁️</button>
-            <button class="btn-copy" data-copy="${acc.password}" title="Copy">📋</button>
-          </div>` : ''}
-        </div>
-
-        <!-- Trạng thái gói (sẽ được cập nhật bởi auto-check) -->
-        <div class="acc-plan-status" id="plan-status-${sub.id}">
-          <span class="acc-plan-checking">⏳ Đang kiểm tra gói...</span>
-        </div>
-
-        <!-- ACTION BUTTONS -->
-        <div class="account-actions">
-          <button class="btn btn-sm btn-primary acc-get-link-btn"
-            data-sub="${sub.id}"
-            data-cookie="${encodeURIComponent(cookie)}">
-            🔗 Get Login Link
-          </button>
-          <button class="btn btn-sm btn-outline acc-tv-btn"
-            data-sub="${sub.id}"
-            data-cookie="${encodeURIComponent(cookie)}">
-            📺 Nhập mã TV
-          </button>
-          <button class="btn btn-sm btn-warning acc-warranty-btn"
-            data-sub="${sub.id}"
-            data-cookie="${encodeURIComponent(cookie)}"
-            title="Cookie die hoặc mất Premium — hệ thống tự động đổi tài khoản (Bảo hành / claim_warranty)">
-            🔧 Bảo hành
-          </button>
-          <button type="button" class="btn btn-sm btn-outline acc-report-view-btn"
-            data-sub="${sub.id}"
-            data-cookie="${encodeURIComponent(cookie)}"
-            title="Vẫn không xem được dù tài khoản OK — gửi admin kiểm tra tay. Cookie die / mất gói → Bảo hành.">
-            🚨 Báo lỗi — không xem được
-          </button>
-        </div>
-
-        <!-- GET LINK RESULT -->
-        <div class="acc-result-box" id="result-link-${sub.id}" style="display:none;"></div>
-
-        <!-- TV FORM (hidden until button clicked) -->
-        <div class="tv-login-box" id="tv-box-${sub.id}" style="display:none;">
-          <div class="acc-result-box tv-login-status" id="result-tv-${sub.id}" style="display:none;" aria-live="polite"></div>
-          <div class="tv-login-body">
-            <p class="tv-instruction">Nhập mã số hiển thị trên TV Netflix (6–10 chữ số).</p>
-            <div class="tv-input-row">
-              <input type="text" class="tv-code-input" id="tv-code-${sub.id}"
-                placeholder="32148294" maxlength="10" inputmode="numeric" autocomplete="one-time-code">
-              <div class="tv-actions">
-                <button type="button" class="btn btn-primary acc-tv-submit-btn" data-sub="${sub.id}">Gửi mã</button>
-                <button type="button" class="btn btn-outline acc-tv-cancel-btn" data-sub="${sub.id}">Huỷ</button>
+            <div class="premium-card-body">
+              <div class="content-display-box">
+                <pre>${deliveredContent}</pre>
+                <button class="premium-copy-btn btn-copy" data-copy="${escapeAttr(deliveredContent)}" title="Copy">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  <span>Sao chép</span>
+                </button>
               </div>
             </div>
           </div>
-        </div>
+        ` : sub.status === 'pending' ? `
+          <div class="dash-premium-pending">
+            <div class="pending-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin-slow"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            </div>
+            <div class="pending-text">
+              <h4>Đang chuẩn bị sản phẩm</h4>
+              <p>Sản phẩm sẽ được giao tự động hoặc bởi admin.</p>
+            </div>
+          </div>
+        ` : ''}
+      </div>` : ''}
 
-        <!-- WARRANTY RESULT -->
-        <div class="acc-result-box" id="result-warranty-${sub.id}" style="display:none;"></div>
+      ${/* ── Netflix only ── * / ''}
+      ${hasAccount && acc ? `
+      <!-- ===== ACCOUNT INFO ===== -->
+      <div class="dash-premium-acc-box">
+        <div class="premium-card">
+          <div class="premium-card-header" style="background:rgba(229,9,20,0.05);">
+            <div class="premium-card-title">
+              <span class="icon" style="color:#E50914;background:rgba(229,9,20,0.15);border:1px solid rgba(229,9,20,0.2)">🎬</span>
+              <span>Thông tin tài khoản Netflix</span>
+            </div>
+            ${sub.end_at ? '<span class="premium-badge" style="background:rgba(255,255,255,0.08);color:#cbd5e1;border:1px solid rgba(255,255,255,0.15)">Hết hạn: ' + formatDate(sub.end_at) + '</span>' : ''}
+          </div>
+          <div class="premium-card-body">
+            ${sub.end_at ? `
+            <div class="account-validity-banner" style="margin-bottom:16px;">
+              Các nút <strong>Get link</strong>, <strong>TV</strong>, <strong>Bảo hành</strong> dùng được trong thời gian này.
+            </div>` : ''}
+            ${vrRejected ? `
+            <div class="viewer-report-user-notice" role="status">
+              <strong>Phản hồi từ shop</strong>
+              <p class="viewer-report-user-notice__text">${escHtml(vrRejected.admin_note)}</p>
+              ${vrRejected.resolved_at ? '<p class="viewer-report-user-notice__meta">' + formatDate(vrRejected.resolved_at) + '</p>' : ''}
+            </div>` : ''}
+            
+            <div style="display:flex;flex-direction:column;">
+              ${acc.email ? `
+              <div class="premium-acc-row">
+                <span class="premium-acc-label">Email</span>
+                <span class="premium-acc-val">${acc.email}</span>
+                <button class="premium-copy-btn btn-copy" data-copy="${acc.email}" title="Copy" style="padding:4px 8px;font-size:11px;">📋 Copy</button>
+              </div>` : ''}
+              ${acc.password ? `
+              <div class="premium-acc-row">
+                <span class="premium-acc-label">Mật khẩu</span>
+                <span class="premium-acc-val acc-pass-masked" id="pass-${sub.id}">${maskPassword(acc.password)}</span>
+                <button class="premium-copy-btn btn-toggle-pass acc-icon-btn" data-sub="${sub.id}" data-pass="${encodeURIComponent(acc.password)}" title="Hiện/Ẩn" style="padding:4px 8px;font-size:11px;">👁️ Ẩn/Hiện</button>
+                <button class="premium-copy-btn btn-copy" data-copy="${acc.password}" title="Copy" style="padding:4px 8px;font-size:11px;">📋 Copy</button>
+              </div>` : ''}
+            </div>
+
+            <!-- Trạng thái gói (sẽ được cập nhật bởi auto-check) -->
+            <div class="acc-plan-status" id="plan-status-${sub.id}" style="margin:12px 0;">
+              <span class="acc-plan-checking">⏳ Đang kiểm tra gói...</span>
+            </div>
+
+            <!-- ACTION BUTTONS -->
+            <div class="premium-actions-row">
+              <button class="btn btn-sm btn-primary acc-get-link-btn"
+                data-sub="${sub.id}"
+                data-cookie="${encodeURIComponent(cookie)}"
+                style="background:linear-gradient(135deg, #E50914 0%, #B80710 100%);">
+                🔗 Get Login Link
+              </button>
+              <button class="btn btn-sm btn-outline acc-tv-btn"
+                data-sub="${sub.id}"
+                data-cookie="${encodeURIComponent(cookie)}">
+                📺 Nhập mã TV
+              </button>
+              <button class="btn btn-sm btn-warning acc-warranty-btn"
+                data-sub="${sub.id}"
+                data-cookie="${encodeURIComponent(cookie)}"
+                title="Cookie die hoặc mất Premium — hệ thống tự động đổi tài khoản (Bảo hành / claim_warranty)">
+                🔧 Bảo hành
+              </button>
+              <button type="button" class="btn btn-sm btn-outline acc-report-view-btn"
+                data-sub="${sub.id}"
+                data-cookie="${encodeURIComponent(cookie)}"
+                title="Vẫn không xem được dù tài khoản OK — gửi admin kiểm tra tay. Cookie die / mất gói → Bảo hành.">
+                🚨 Báo lỗi
+              </button>
+            </div>
+
+            <!-- GET LINK RESULT -->
+            <div class="acc-result-box" id="result-link-${sub.id}" style="display:none;margin-top:16px;"></div>
+
+            <!-- TV FORM (hidden until button clicked) -->
+            <div class="tv-login-box" id="tv-box-${sub.id}" style="display:none;margin-top:16px;">
+              <div class="acc-result-box tv-login-status" id="result-tv-${sub.id}" style="display:none;" aria-live="polite"></div>
+              <div class="tv-login-body">
+                <p class="tv-instruction">Nhập mã số hiển thị trên TV Netflix (6–10 chữ số).</p>
+                <div class="tv-input-row">
+                  <input type="text" class="tv-code-input" id="tv-code-${sub.id}"
+                    placeholder="32148294" maxlength="10" inputmode="numeric" autocomplete="one-time-code">
+                  <div class="tv-actions">
+                    <button type="button" class="btn btn-primary acc-tv-submit-btn" data-sub="${sub.id}">Gửi mã</button>
+                    <button type="button" class="btn btn-outline acc-tv-cancel-btn" data-sub="${sub.id}">Huỷ</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- WARRANTY RESULT -->
+            <div class="acc-result-box" id="result-warranty-${sub.id}" style="display:none;margin-top:16px;"></div>
+          </div>
+        </div>
       </div>
       ` : ''}
 
@@ -487,16 +1166,17 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
       </div>
       ` : ''}
 
-      ${isActive && !sub.login_link && !expired ? `
+      ${/* Chỉ hiện cho Netflix: active nhưng chưa có login_link (đang chờ auto-assign) * /}
+      ${isActive && isNetflix && !sub.login_link && !expired ? `
       <div class="acc-pending-notice" id="pending-notice-${sub.id}">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-          <span style="display:flex;align-items:center;gap:8px;"><span class="link-pulse"></span> Tài khoản đang được chuẩn bị — hệ thống sẽ tự gán trong ít phút...</span>
+          <span style="display:flex;align-items:center;gap:8px;"><span class="link-pulse"></span> Tài khoản Netflix đang được chuẩn bị — hệ thống sẽ tự gán trong ít phút...</span>
         </div>
         <div style="font-size:12px;margin-top:6px;color:var(--warning);opacity:.75;">Tự động kiểm tra mỗi 20 giây</div>
       </div>
       ` : ''}
       ${sub.status === 'pending' ? (() => {
-        const CANCEL_AFTER_MS = 30 * 60 * 1000 // 30 phút
+        const CANCEL_AFTER_MS = 30 * 60 * 1000 /* 30 phút * /
         const createdMs = sub.created_at ? new Date(sub.created_at).getTime() : Date.now()
         const remainingMs = Math.max(0, createdMs + CANCEL_AFTER_MS - Date.now())
         const remainingMin = Math.floor(remainingMs / 60000)
@@ -850,58 +1530,78 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     const planStatusEl = panel.querySelector(`#plan-status-${subId}`)
     if (!cookie || !planStatusEl) { if (planStatusEl) planStatusEl.innerHTML = ''; return }
 
-    // Kiểm tra nền sau 1s để không block render
+    // Kiểm tra nền sau 1.2s để không block render
     setTimeout(async () => {
       try {
+        // BƯỚC 1: Check nhanh via nftoken.site
         const check = await apiCheckPlanStatus(cookie)
+
         if (!check.alive) {
-          planStatusEl.innerHTML = `
-            <div class="acc-plan-alert acc-plan-alert--dead">
-              ❌ Cookie đã die — tài khoản không truy cập được
-              <button class="btn btn-xs btn-danger acc-warranty-btn-inline" data-sub="${subId}" data-cookie="${encodeURIComponent(cookie)}" style="margin-left:8px;">Bảo hành ngay</button>
-            </div>`
-        } else if (!check.hasPremium) {
-          planStatusEl.innerHTML = `
-            <div class="acc-plan-alert acc-plan-alert--noPlan">
-              ⚠️ Cookie sống nhưng <strong>mất gói Premium</strong> (hiện: ${check.plan || 'không có gói'})
-              <button class="btn btn-xs btn-warning acc-warranty-btn-inline" data-sub="${subId}" data-cookie="${encodeURIComponent(cookie)}" style="margin-left:8px;">Bảo hành ngay</button>
-            </div>`
-        } else {
-          planStatusEl.innerHTML = `
-            <div class="acc-plan-alert acc-plan-alert--ok">
-              ✅ Gói: <strong>${check.plan || 'Premium'}</strong>
-              ${check.screens ? ` · ${check.screens} màn hình` : ''}
-            </div>`
+          // Cookie chết → tự động bảo hành ngay
+          planStatusEl.innerHTML = `<div class="acc-plan-alert acc-plan-alert--dead">❌ Cookie đã die — đang tự động đổi tài khoản...</div>`
+          planCheckBySub.set(subId, { alive: false, hasPremium: false, paymentError: false })
+          await triggerWarranty(subId, cookie, panel, renewPlans, 'cookie_dead')
+          return
         }
 
-        planCheckBySub.set(subId, { alive: !!check.alive, hasPremium: !!check.hasPremium })
-        const needWarranty = !check.alive || !check.hasPremium
+        if (!check.hasPremium) {
+          // Mất gói → tự động bảo hành
+          planStatusEl.innerHTML = `<div class="acc-plan-alert acc-plan-alert--noPlan">⚠️ Mất gói Premium (${check.plan || '—'}) — đang tự động đổi tài khoản...</div>`
+          planCheckBySub.set(subId, { alive: true, hasPremium: false, paymentError: false })
+          await triggerWarranty(subId, cookie, panel, renewPlans, 'plan_lost')
+          return
+        }
+
+        // BƯỚC 2: Cookie OK + có gói → deep check via /api/netflix-account-info
+        // (server sẽ fetch /account + /browse để detect popup "Your account is on hold")
+        let paymentError = hasPaymentIssue(check) || hasPaymentIssue(check.raw)
+        let deepPlan = check.plan || 'Premium'
+
+        if (!paymentError) {
+          try {
+            const acct = await apiNetflixAccountInfo(cookie)
+            if (hasPaymentIssue(acct)) {
+              paymentError = true
+              if (acct.plan) deepPlan = acct.plan
+            }
+          } catch {
+            // Bỏ qua lỗi mạng khi deep check
+          }
+        }
+
+        if (paymentError) {
+          // Lỗi thanh toán → tự động bảo hành
+          planStatusEl.innerHTML = `
+            <div class="acc-plan-alert acc-plan-alert--paymentError">
+              🚫 <strong>Lỗi thanh toán</strong> — tài khoản bị hold, đang tự động đổi tài khoản mới...
+            </div>`
+          planCheckBySub.set(subId, { alive: true, hasPremium: true, paymentError: true })
+          await triggerWarranty(subId, cookie, panel, renewPlans, 'payment_error')
+          return
+        }
+
+        // Tất cả OK
+        planStatusEl.innerHTML = `
+          <div class="acc-plan-alert acc-plan-alert--ok">
+            ✅ Gói: <strong>${deepPlan}</strong>
+            ${check.screens ? ` · ${check.screens} màn hình` : ''}
+          </div>`
+
+        planCheckBySub.set(subId, { alive: true, hasPremium: true, paymentError: false })
         const getLinkBtn = panel.querySelector(`.acc-get-link-btn[data-sub="${subId}"]`)
         const tvBtnEl = panel.querySelector(`.acc-tv-btn[data-sub="${subId}"]`)
         for (const b of [getLinkBtn, tvBtnEl]) {
           if (!b) continue
-          b.disabled = needWarranty
-          b.setAttribute('aria-disabled', needWarranty ? 'true' : 'false')
-          if (needWarranty) {
-            b.title = !check.alive
-              ? 'Cookie hết hiệu lực — bấm Bảo hành để đổi tài khoản trước khi lấy link / TV.'
-              : 'Tài khoản mất gói Premium — bấm Bảo hành để đổi tài khoản trước khi lấy link / TV.'
-            b.classList.add('acc-action-needs-warranty')
-          } else {
-            b.removeAttribute('title')
-            b.classList.remove('acc-action-needs-warranty')
-          }
+          b.disabled = false
+          b.removeAttribute('title')
+          b.classList.remove('acc-action-needs-warranty')
         }
-
-        // Bind inline warranty buttons
-        planStatusEl.querySelectorAll('.acc-warranty-btn-inline').forEach(b => {
-          b.addEventListener('click', () => triggerWarranty(b.dataset.sub, decodeURIComponent(b.dataset.cookie), panel, renewPlans))
-        })
       } catch {
         planStatusEl.innerHTML = '' // Lỗi mạng → ẩn đi
       }
     }, 1200)
   })
+
 
   async function submitViewerReport(subId, panel) {
     const resultEl = panel.querySelector(`#result-warranty-${subId}`)
@@ -922,35 +1622,48 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     }
   }
 
-  // ===== Bảo hành: cookie die / mất gói → claim_warranty tự động =====
-  async function triggerWarranty(subId, cookie, panel, renewPlans) {
+  // ===== Bảo hành: cookie die / mất gói / lỗi TT → claim_warranty tự động =====
+  // preReason: nếu auto-check đã xác định lý do → truyền vào để bỏ qua bước re-check
+  async function triggerWarranty(subId, cookie, panel, renewPlans, preReason) {
     const resultEl = panel.querySelector(`#result-warranty-${subId}`)
     const warrantyBtn = panel.querySelector(`.acc-warranty-btn[data-sub="${subId}"]`)
     if (warrantyBtn) warrantyBtn.disabled = true
 
     try {
-      let reason = 'unknown'
+      let reason = preReason || 'unknown'
 
-      if (cookie) {
+      // Nếu không có preReason → check lại để xác nhận (khi bấm nút thủ công)
+      if (!preReason && cookie) {
         showResult(resultEl, 'loading', '\u23f3 \u0110ang ki\u1ec3m tra t\u00ecnh tr\u1ea1ng t\u00e0i kho\u1ea3n...')
         try {
           const check = await apiCheckPlanStatus(cookie)
           if (check.alive && check.hasPremium) {
-            showResult(resultEl, 'success', `\u2705 T\u00e0i kho\u1ea3n OK \u2014 g\u00f3i ${check.plan || 'Premium'} \u0111ang ho\u1ea1t \u0111\u1ed9ng b\u00ecnh th\u01b0\u1eddng.`)
-            if (warrantyBtn) warrantyBtn.disabled = false
-            return
+            // Nftoken OK → deep check lỗi TT qua /browse
+            let payErr = hasPaymentIssue(check) || hasPaymentIssue(check.raw)
+            if (!payErr) {
+              try {
+                const acct = await apiNetflixAccountInfo(cookie)
+                payErr = hasPaymentIssue(acct)
+              } catch {}
+            }
+            if (!payErr) {
+              showResult(resultEl, 'success', `\u2705 T\u00e0i kho\u1ea3n OK \u2014 g\u00f3i ${check.plan || 'Premium'} \u0111ang ho\u1ea1t \u0111\u1ed9ng b\u00ecnh th\u01b0\u1eddng.`)
+              if (warrantyBtn) warrantyBtn.disabled = false
+              return
+            }
+            reason = 'payment_error'
+          } else {
+            reason = check.reason || (!check.alive ? 'cookie_dead' : 'plan_lost')
           }
-          reason = check.reason || (!check.alive ? 'cookie_dead' : 'plan_lost')
-        } catch {
-        }
+        } catch {}
+      }
 
-        const reasonMsg = reason === 'plan_lost'
+      const reasonMsg = reason === 'payment_error'
+        ? '\u23f3 Ph\u00e1t hi\u1ec7n l\u1ed7i thanh to\u00e1n (t\u00e0i kho\u1ea3n b\u1ecb hold). \u0110ang \u0111\u1ed5i t\u00e0i kho\u1ea3n m\u1edbi...'
+        : reason === 'plan_lost'
           ? '\u23f3 Ph\u00e1t hi\u1ec7n m\u1ea5t g\u00f3i Premium. \u0110ang \u0111\u1ed5i t\u00e0i kho\u1ea3n m\u1edbi...'
           : '\u23f3 Cookie \u0111\u00e3 die. \u0110ang x\u1eed l\u00fd b\u1ea3o h\u00e0nh...'
-        showResult(resultEl, 'loading', reasonMsg)
-      } else {
-        showResult(resultEl, 'loading', '\u23f3 \u0110ang x\u1eed l\u00fd b\u1ea3o h\u00e0nh...')
-      }
+      showResult(resultEl, 'loading', reasonMsg)
 
       const warranty = await claimWarranty(subId)
 
@@ -985,6 +1698,7 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
     })
   })
 }
+*/
 
 // Helper: show result with state
 function showResult(el, state, message) {

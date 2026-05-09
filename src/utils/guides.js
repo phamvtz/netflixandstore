@@ -1,5 +1,5 @@
 /**
- * Cấu hình bài hướng dẫn (settings.guides_config — JSON string)
+ * Cấu hình bài hướng dẫn (settings.guides_config - JSON string)
  */
 export function slugifyTitle(title) {
   return String(title || '')
@@ -16,7 +16,7 @@ export function parseGuidesConfig(raw) {
   const empty = {
     introTitle: 'Hướng dẫn sử dụng',
     introSubtitle: 'Các bài hướng dẫn chi tiết giúp bạn sử dụng dịch vụ dễ dàng và hiệu quả nhất.',
-    posts: []
+    posts: [],
   }
   if (raw == null || raw === '') return empty
   const str = typeof raw === 'string' ? raw : JSON.stringify(raw)
@@ -25,7 +25,7 @@ export function parseGuidesConfig(raw) {
     return {
       introTitle: typeof j.introTitle === 'string' ? j.introTitle : empty.introTitle,
       introSubtitle: typeof j.introSubtitle === 'string' ? j.introSubtitle : empty.introSubtitle,
-      posts: Array.isArray(j.posts) ? j.posts.filter(p => p && typeof p === 'object') : []
+      posts: Array.isArray(j.posts) ? j.posts.filter(p => p && typeof p === 'object') : [],
     }
   } catch {
     return empty
@@ -75,6 +75,6 @@ export function normalizeGuidePost(p) {
     youtubeUrl: String(p.youtubeUrl || '').trim(),
     order: Number.isFinite(Number(p.order)) ? Number(p.order) : 0,
     published: p.published !== false,
-    updatedAt: p.updatedAt || new Date().toISOString()
+    updatedAt: p.updatedAt || new Date().toISOString(),
   }
 }

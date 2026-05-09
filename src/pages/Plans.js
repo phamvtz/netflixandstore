@@ -1,4 +1,4 @@
-import { getPlans, getPlansForSellerStore, getSettings } from '../utils/api.js'
+import { getPlans, getPlansForSellerStore, getSettings, getCatalogData } from '../utils/api.js'
 import { getCheckoutStore } from '../utils/storeContext.js'
 import { renderPlanCard } from '../components/PlanCard.js'
 import { isLoggedIn } from '../utils/auth.js'
@@ -45,6 +45,18 @@ export async function renderPlans(container) {
 
   const load = async () => {
     renderSkeleton()
+
+    if (urlGroup === 'other') {
+      try {
+        const [catalogCategories, settings] = await Promise.all([
+          getCatalogData(),
+          getSettings().catch(() => ({}))
+        ])
+        renderCatalogPage(container, catalogCategories, settings)
+      } catch (err) { renderError(err.message, load) }
+      return
+    }
+
     let plans
     let settings
     try {
@@ -62,17 +74,6 @@ export async function renderPlans(container) {
         selectedService: q.get('service'),
         selectedAccount: q.get('account'),
       })
-    } else if (urlGroup === 'other') {
-      const otherPlans = visible.filter(p => (p.service || 'netflix') !== 'netflix')
-      if (!otherPlans.length) renderOtherProductsEmpty(container)
-      else {
-        renderAllServices(container, otherPlans, onSelect, settings, {
-          title: 'Sản phẩm khác',
-          desc: 'Các gói ngoài Netflix (ứng dụng khác hoặc danh mục tùy chỉnh).',
-          backHref: '#/products',
-          backLabel: '← Dịch vụ'
-        })
-      }
     } else if (urlService) {
       renderSingleService(container, visible, urlService, onSelect, settings)
     } else {
@@ -170,9 +171,9 @@ function renderAllServices(container, plans, onSelect, settings = {}, viewOpts =
     ? `<div class="plans-service-nav">
         ${orderedServices.map(id => {
           const s = getServiceForDisplay(id, settings)
-          return `<a href="#svc-${id}" class="psn-pill" style="--c:${s.color};">
+          return `<button type="button" class="psn-pill" style="--c:${s.color};" data-scroll-to="svc-${id}">
             <span style="font-size:14px;">${s.icon}</span> ${s.name}
-          </a>`
+          </button>`
         }).join('')}
       </div>`
     : ''
@@ -195,6 +196,14 @@ function renderAllServices(container, plans, onSelect, settings = {}, viewOpts =
         </div>
       </div>
     </section>`
+
+  // Scroll-to pill listeners
+  container.querySelectorAll('[data-scroll-to]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = container.querySelector(`#${btn.dataset.scrollTo}`)
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  })
 
   // Render plan cards
   orderedServices.forEach(svcId => {
@@ -238,7 +247,7 @@ function renderSingleService(container, plans, svcId, onSelect, settings = {}) {
     container.innerHTML = `
       <section class="plans-page">
         <div class="page-container">
-          <a href="#/products" class="plans-back-link reveal">← Tất cả dịch vụ &amp; sản phẩm</a>
+          <a href="#/products" class="plans-back-link reveal">← Tất cả dịch vụ</a>
           <div class="plans-service-header reveal" style="--svc-color:${svcInfo.color};--svc-bg:${svcInfo.bg};">
             <div class="psh-icon">${svcInfo.icon}</div>
             <div>
@@ -292,7 +301,7 @@ function renderSingleService(container, plans, svcId, onSelect, settings = {}) {
     container.innerHTML = `
       <section class="plans-page">
         <div class="page-container">
-          <a href="#/products" class="plans-back-link reveal">← Tất cả dịch vụ &amp; sản phẩm</a>
+          <a href="#/products" class="plans-back-link reveal">← Tất cả dịch vụ</a>
           <div class="plans-service-header reveal" style="--svc-color:${svcInfo.color};--svc-bg:${svcInfo.bg};">
             <div class="psh-icon">${svcInfo.icon}</div>
             <div>
@@ -334,13 +343,227 @@ function renderOtherProductsEmpty(container) {
       <div class="page-container" style="text-align:center;padding:80px 20px;">
         <a href="#/products" class="plans-back-link" style="display:inline-block;margin-bottom:var(--sp-6);">← Dịch vụ</a>
         <p style="font-size:48px;margin-bottom:16px;">🛍</p>
-        <h2 style="margin-bottom:8px;">Chưa có sản phẩm khác</h2>
+        <h2 style="margin-bottom:8px;">Chưa có dịch vụ số</h2>
         <p style="color:var(--text-secondary);max-width:420px;margin:0 auto;line-height:1.6;">
           Hiện shop chỉ có gói Netflix. Xem <a href="#/plans?service=netflix">Gói Netflix</a>
           hoặc <a href="#/plans">toàn bộ bảng giá</a>.
         </p>
       </div>
     </section>`
+}
+
+// ══════════════════════════════════════════════════════════════
+// Render catalog page from new product_categories / products / variants
+// ══════════════════════════════════════════════════════════════
+function renderCatalogPage(container, categories, settings = {}) {
+  const telegramLink = settings.contact_telegram || null
+  const hashSearch = window.location.hash.includes('?') ? window.location.hash.split('?')[1] : ''
+  const typeFilter = new URLSearchParams(hashSearch).get('type')
+
+  if (!categories || !categories.length) {
+    renderOtherProductsEmpty(container)
+    return
+  }
+
+  if (typeFilter === 'stock' || typeFilter === 'manual') {
+    categories = categories
+      .map(cat => ({
+        ...cat,
+        products: (cat.products || []).filter((p) => {
+          const isStock = ['stock', 'key'].includes(p.fulfillment_type || '')
+          return typeFilter === 'stock' ? isStock : !isStock
+        })
+      }))
+      .filter(cat => (cat.products || []).length > 0)
+  }
+
+  if (!categories.length) {
+    renderOtherProductsEmpty(container)
+    return
+  }
+
+  const _e = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  const fmt = n => (n || n === 0) ? Number(n).toLocaleString('vi-VN') + '₫' : '—'
+
+  const dayLabel = (days) => {
+    const n = Number(days || 0)
+    if (!n) return ''
+    if (n >= 360) return n % 365 === 0 ? `${Math.round(n / 365)} năm` : `${n} ngày`
+    if (n >= 60 && n % 30 === 0) return `${Math.round(n / 30)} tháng`
+    if (n >= 28 && n <= 31) return '1 tháng'
+    return `${n} ngày`
+  }
+
+  const productDurationFromName = (text) => {
+    const s = String(text || '').toLowerCase()
+    const day = s.match(/(?:^|[^\d])(\d{1,4})\s*(?:d|day|days|ngày|ngay)(?=$|[^\p{L}\d])/iu)
+    if (day) return Number(day[1])
+    const year = s.match(/(?:^|[^\d])(\d{1,2})\s*(?:y|year|years|năm|nam)(?=$|[^\p{L}\d])/iu)
+    if (year) return Number(year[1]) * 365
+    const month = s.match(/(?:^|[^\d])(\d{1,3})\s*(?:m|month|months|tháng|thang)(?=$|[^\p{L}\d])/iu)
+    if (month) return Number(month[1]) * 30
+    return null
+  }
+
+  const variantDays = (product, variant) =>
+    Number(variant?.duration_days || 0) || productDurationFromName(variant?.name || variant?.label) || productDurationFromName(product?.name) || 30
+
+  const variantDescription = (product, variant, days) => {
+    const name = String(variant?.name || variant?.label || '').toLowerCase()
+    if (days <= 40 && (String(product.name || '').toLowerCase().includes('35') || name.includes('35'))) {
+      return 'Trải nghiệm Pro ngắn hạn, tài khoản chia sẻ không watermark.'
+    }
+    if (days >= 360) return 'Giá tốt nhất, tiết kiệm tối đa không lo gián đoạn.'
+    if (days >= 170) return 'Lựa chọn tối ưu cho creator, dùng lâu dài tiết kiệm hơn.'
+    if (days >= 80) return 'Tiết kiệm hơn gói tháng, đầy đủ tính năng Pro không giới hạn.'
+    return product.shortDescription || 'Truy cập toàn bộ tính năng Pro, xuất 4K, không watermark.'
+  }
+
+  const variantDisplayLabel = (product, variant, days) => {
+    const label = String(variant?.name || variant?.label || '').trim()
+    const explicitProductDays = productDurationFromName(product?.name)
+    if (explicitProductDays === days && /(?:^|[^\d])\d{1,3}\s*(m|month|months|tháng|thang|y|year|years|năm|nam)(?=$|[^\p{L}\d])/iu.test(label)) {
+      return dayLabel(days)
+    }
+    return label || dayLabel(days) || 'Gói'
+  }
+
+  const savingsText = (variants, variant, days) => {
+    if (days < 60 || !variant?.price) return ''
+    const monthly = variants.find(v => {
+      const d = Number(v.duration_days || 0) || productDurationFromName(v.name || v.label)
+      return d >= 28 && d <= 31
+    })
+    if (!monthly?.price) return ''
+    const expected = Number(monthly.price) * (days / 30)
+    if (expected <= Number(variant.price)) return ''
+    const pct = Math.round((1 - Number(variant.price) / expected) * 100)
+    return pct > 0 ? `Tiết kiệm ${pct}%` : ''
+  }
+
+  const renderVariantCard = (product, variant, variants, index) => {
+    const loggedIn = isLoggedIn()
+    const href = loggedIn ? `#/payment/${_e(variant.id)}` : '#/login'
+    const days = variantDays(product, variant)
+    const period = dayLabel(days)
+    const label = variantDisplayLabel(product, variant, days)
+    const popular = index === 2 || String(variant.name || '').includes('3 Tháng')
+    const savings = savingsText(variants, variant, days)
+    return `<article class="cplan-card${popular ? ' is-popular' : ''}">
+      ${popular ? '<span class="cplan-popular">Phổ biến</span>' : ''}
+      <div class="cplan-card-head">
+        <h3>${_e(product.name)}</h3>
+        <span>${_e(label)}</span>
+      </div>
+      <p>${_e(variantDescription(product, variant, days))}</p>
+      <div class="cplan-price-row">
+        <strong>${fmt(variant.price)}</strong>
+        ${period ? `<span>/ ${_e(period)}</span>` : ''}
+      </div>
+      ${savings ? `<div class="cplan-save">${_e(savings)}</div>` : ''}
+      <a class="btn btn-primary cplan-buy" href="${href}">${loggedIn ? 'Mua hàng' : 'Đăng nhập để mua'}</a>
+    </article>`
+  }
+
+  const serviceSections = categories
+    .map(category => {
+      const products = category.products || []
+      const fallbackProduct = products[0] || { id: category.id, name: category.name, price: 0 }
+      const product = {
+        ...fallbackProduct,
+        id: category.id,
+        name: category.name,
+        shortDescription: category.description || fallbackProduct.shortDescription
+      }
+      const variants = products
+        .flatMap(item => (item.variants || []).map(variant => ({ ...variant, _product: item })))
+        .sort((a, b) => variantDays(product, a) - variantDays(product, b))
+      return { category, product, variants }
+    })
+    .filter(section => section.variants.length || (section.category.products || []).length)
+
+  const sections = serviceSections.map(({ category, product, variants }) => {
+    const cards = variants.length
+      ? variants.map((variant, index) => renderVariantCard(product, variant, variants, index)).join('')
+      : `<article class="cplan-card"><div class="cplan-card-head"><h3>${_e(product.name)}</h3><span>Liên hệ</span></div><p>${_e(product.shortDescription || 'Liên hệ shop để được tư vấn.')}</p><div class="cplan-price-row"><strong>${fmt(product.price)}</strong></div><a class="btn btn-primary cplan-buy" href="${telegramLink || '#/login'}">Liên hệ</a></article>`
+    return `<section class="cplan-section" id="category-${_e(category.id)}">
+      <div class="cplan-product-head">
+        <div>
+          <h2>${_e(product.name)}</h2>
+          <p>${_e(product.shortDescription || category.description || 'Chọn gói phù hợp, thanh toán và nhận nội dung kích hoạt từ kho.')}</p>
+        </div>
+        <span>${variants.length || 1} gói</span>
+      </div>
+      <div class="cplan-grid">${cards}</div>
+    </section>`
+  }).join('')
+
+  const navHtml = serviceSections.length > 1
+    ? serviceSections.map(({ category }) => `<button type="button" class="cpage-pill" data-scroll-to="category-${_e(category.id)}"><span>${_e(category.name)}</span></button>`).join('')
+    : ''
+
+  const totalServices = serviceSections.length
+  const allPrices = categories.flatMap(c =>
+    (c.products||[]).flatMap(p => (p.variants||[]).map(v => v.price||0))
+  ).filter(p => p > 0)
+  const minPrice = allPrices.length ? Math.min(...allPrices) : null
+
+  // ── Render ────────────────────────────────────────────────────
+  const pageTitle = typeFilter === 'stock' ? 'Dịch vụ cấp sẵn' : typeFilter === 'manual' ? 'Dịch vụ xử lý thủ công' : 'Dịch vụ'
+  const pageSub = typeFilter === 'stock'
+    ? 'Dịch vụ có sẵn trong kho, giao nội dung tự động sau khi thanh toán.'
+    : typeFilter === 'manual'
+      ? 'Dịch vụ cần admin xác nhận, xử lý và phản hồi thủ công.'
+      : 'Phần mềm, tài khoản và dịch vụ số — chọn gói, thanh toán, nhận hàng nhanh.'
+
+  container.innerHTML = `<div class="cpage-root">
+
+  <div class="cpage-hero">
+    <div class="cpage-hero-glow"></div>
+    <div class="page-container cpage-hero-inner">
+      <a href="#/products" class="cpage-back">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+        Dịch vụ
+      </a>
+      <h1 class="cpage-hero-title">${pageTitle}</h1>
+      <p class="cpage-hero-sub">${pageSub}</p>
+      <div class="cpage-hero-stats">
+        <div class="cpage-stat"><span class="cpage-stat-num">${totalServices}</span><span class="cpage-stat-lbl">Dịch vụ</span></div>
+        ${minPrice ? `<div class="cpage-stat-div"></div><div class="cpage-stat"><span class="cpage-stat-num">${fmt(minPrice)}</span><span class="cpage-stat-lbl">Từ</span></div>` : ''}
+      </div>
+    </div>
+  </div>
+
+  ${navHtml ? `<div class="cpage-nav-bar" id="cpageNavBar"><div class="page-container cpage-nav-inner">${navHtml}</div></div>` : ''}
+
+  <div class="page-container cpage-body">
+    <div class="cplan-sections">${sections}</div>
+  </div>
+
+</div>`
+
+  // Scroll-to pills
+  container.querySelectorAll('[data-scroll-to]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById(btn.dataset.scrollTo)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  })
+
+  // Scrollspy — highlight active service pill
+  const navBar = container.querySelector('#cpageNavBar')
+  if (navBar && serviceSections.length > 1) {
+    const pills  = [...navBar.querySelectorAll('.cpage-pill')]
+    const secEls = [...container.querySelectorAll('.cplan-section')]
+    const setActive = id => pills.forEach(p => p.classList.toggle('is-active', p.dataset.scrollTo === id))
+    if (pills[0]) pills[0].classList.add('is-active')
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => { if (e.isIntersecting) setActive(e.target.id) })
+    }, { rootMargin: '-25% 0px -65% 0px', threshold: 0 })
+    secEls.forEach(s => io.observe(s))
+    const mo = new MutationObserver(() => { io.disconnect(); mo.disconnect() })
+    mo.observe(container, { childList: true })
+  }
+
 }
 
 function renderFreePlans(container, plans, onSelect, settings = {}, opts = {}) {

@@ -33,11 +33,19 @@ export async function apiCheckCookie(cookie) {
 
 /**
  * POST cookie → kiểm tra alive + có gói Premium không
- * @returns {{ alive, hasPremium, plan, email, screens, needsWarranty, reason }}
+ * @returns {{ alive, hasPremium, plan, email, screens, paymentError, paymentFailed, needsWarranty, reason }}
  * reason: 'cookie_dead' | 'plan_lost' | null
  */
 export async function apiCheckPlanStatus(cookie) {
   return apiFetch('/api/check-plan-status', { cookie })
+}
+
+/**
+ * POST cookie → GET netflix.com/account → trả về plan, billingText, profiles
+ * @returns {{ reachable: boolean, plan: string|null, billingText: string|null, profiles: string[], paymentError?: boolean, paymentFailed?: boolean }}
+ */
+export async function apiNetflixAccountInfo(cookie) {
+  return apiFetch('/api/netflix-account-info', { cookie })
 }
 
 // POST cookie → GET netflix.com/tv8 → return authUrl

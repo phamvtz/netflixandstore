@@ -1,5 +1,6 @@
 import {
-  getPlan, createSubscription, createPayment, getSettings, getCheckoutQuote
+  getPlan, createSubscription, createPayment, getSettings, getCheckoutQuote,
+  getWalletBalance, payWithWallet
 } from '../utils/api.js'
 import { getUser } from '../utils/auth.js'
 import { formatVND, generateTransferContent, planLabel } from '../utils/format.js'
@@ -12,6 +13,32 @@ async function fetchPaymentStatus(transferContent) {
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || data.message || `Payment status failed (${response.status})`)
   return data
+}
+
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function escapeAttr(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+}
+
+function isManualServicePlan(plan) {
+  const service = plan?.service || 'netflix'
+  const fulfillment = plan?.fulfillment_type || (service === 'netflix' ? 'netflix' : 'manual')
+  return service !== 'netflix' && fulfillment === 'manual'
+}
+
+function getManualServiceRequest(container) {
+  const note = container.querySelector('#manualServiceNote')?.value?.trim() || ''
+  const email = container.querySelector('#manualServiceEmail')?.value?.trim() || ''
+  return { customerNote: note, customerContactEmail: email }
 }
 
 export async function renderPayment(container, params) {
@@ -42,7 +69,7 @@ export async function renderPayment(container, params) {
         bank_owner: cfg.bank_owner || 'PHAM VAN VIET',
         momo_number: cfg.momo_number || '0336636315',
         momo_name: cfg.momo_name || 'PHAM VAN VIET',
-        vietqr_bank_bin: '970422'
+        vietqr_bank_bin: cfg.vietqr_bank_bin || '970422'
       }
     } catch {
       container.innerHTML = `
@@ -123,34 +150,22 @@ export async function renderPayment(container, params) {
 
   const transferContent = savedSession?.transferContent ?? generateTransferContent()
 
+  // ── Luôn hiển thị tuỳ chọn Ví TRƯỚC khi tạo subscription qua Bank ──
   if (!savedSession) {
+    let walletBalance = 0
     try {
-      container.innerHTML = `
-        <section class="payment-section">
-          <div class="page-container">
-            <div class="payment-grid">
-              <div class="skeleton payment-skeleton"></div>
-              <div class="skeleton payment-skeleton"></div>
-            </div>
-          </div>
-        </section>`
-      const subscription = await createSubscription(user.id, planId, payOpts)
-      await createPayment(user.id, subscription.id, plan.price, planId, 'bank', transferContent, payOpts)
-      savedSession = {
-        transferContent,
-        subscriptionId: subscription.id,
-        orderCode: subscription.id.replace(/-/g, '').substring(0, 8).toUpperCase()
-      }
-      sessionStorage.setItem(sessionKey, JSON.stringify(savedSession))
-    } catch (error) {
-      container.innerHTML = `
-        <div style="text-align:center;padding:80px 20px;">
-          <p style="color:red;">Lỗi khởi tạo thanh toán: ${error.message}</p>
-          <a href="#/plans" class="btn btn-primary" style="margin-top:12px;">Thử lại</a>
-        </div>`
-      return
-    }
+      const wd = await getWalletBalance()
+      walletBalance = wd.balance || 0
+    } catch (_) {}
+
+    showWalletPayOption(container, plan, planId, walletBalance, checkoutStore?.id ?? null, {
+      bankName, bankAccount, bankOwner, vietqrBin, momoNumber, momoName,
+      storeSlug: checkoutStore?.slug || '', paymentSource: paymentCfg.source || 'site',
+      sellerStoreId: checkoutStore?.id ?? null, sessionKey, transferContent, payOpts
+    })
+    return
   }
+
 
   showWaitingUI(container, plan, planId, transferContent, sessionKey, {
     bankName,
@@ -257,7 +272,7 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
             Đang chờ xác nhận chuyển khoản...
           </h2>
           <p id="waitDesc" style="color:var(--text-secondary);font-size:14px;margin:0 0 24px;line-height:1.7;">
-            Chuyển khoản theo thông tin trên. Hệ thống tự động kiểm tra giao dịch khoảng mỗi 10 giây.<br>
+            Chuyển khoản theo thông tin trên. Hệ thống tự động kiểm tra giao dịch mỗi 3 giây.<br>
             Vui lòng <strong style="color:var(--text-primary);">không tắt trang</strong> sau khi đã chuyển khoản.
           </p>
 
@@ -315,7 +330,7 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
   }
 
   const maxWaitMs = 900_000
-  const pollInterval = 10_000
+  const pollInterval = 3_000
   let startTime = Date.now()
   let lastCheckTime = 0
   let polling = true
@@ -372,10 +387,43 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
     if (elapsedText) elapsedText.style.display = 'none'
 
     if (isManualService) {
-      waitTitle.textContent = 'Thanh toán thành công'
-      waitDesc.innerHTML = `Đơn <strong>${plan.name}</strong> đã được ghi nhận.<br>
-        Admin sẽ xử lý và liên hệ bạn trong thời gian sớm nhất.<br>
-        <small style="color:var(--text-secondary)">Kiểm tra trạng thái tại mục Tài khoản.</small>`
+      waitTitle.textContent = 'Thanh toán thành công! 🎉'
+      const cfg = window.__siteSettings || {}
+      const tgLink  = cfg.contact_telegram  || cfg.telegram_link  || ''
+      const zaloLink = cfg.contact_zalo     || cfg.zalo_link      || ''
+      const tgContactHtml = tgLink
+        ? `<a href="${tgLink}" target="_blank" rel="noopener"
+              style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;
+                     background:#229ED9;color:#fff;border-radius:10px;font-weight:700;
+                     font-size:14px;text-decoration:none;margin:4px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.95 8.15l-2.02 9.54c-.15.68-.54.84-1.09.52l-3-2.21-1.45 1.39c-.16.16-.29.29-.6.29l.21-3.02 5.51-4.98c.24-.21-.05-.33-.37-.12L5.93 13.6 2.97 12.7c-.66-.21-.67-.66.14-.97l11.64-4.49c.55-.2 1.03.13.86.91z"/></svg>
+              Liên hệ Telegram
+           </a>`
+        : ''
+      const zaloContactHtml = zaloLink
+        ? `<a href="${zaloLink}" target="_blank" rel="noopener"
+              style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;
+                     background:#0068FF;color:#fff;border-radius:10px;font-weight:700;
+                     font-size:14px;text-decoration:none;margin:4px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="12"/><path fill="#fff" d="M17 8.5c0-2.49-2.24-4.5-5-4.5S7 6.01 7 8.5c0 1.68.99 3.14 2.5 3.95-.1.37-.33.98-.75 1.55 1.1-.22 1.95-.8 2.48-1.31.26.03.51.05.77.05 2.76 0 5-2.01 5-4.24z"/></svg>
+              Liên hệ Zalo
+           </a>`
+        : ''
+      waitDesc.innerHTML = `
+        <div style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);border-radius:14px;padding:18px;margin-bottom:16px;">
+          <div style="font-size:22px;margin-bottom:8px;">&#127881;</div>
+          <strong style="font-size:15px;color:var(--text-primary);">&#272;ơn <em>${plan.name}</em> đã được ghi nhận!</strong><br>
+          <span style="font-size:13px;color:var(--text-secondary);">Admin sẽ tiếp nhận và cấp dịch vụ sớm nhất có thể.</span>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px;">&#128172; Liên hệ admin để nhận dịch vụ:</div>
+          <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:4px;">
+            ${tgContactHtml}
+            ${zaloContactHtml}
+            ${!tgContactHtml && !zaloContactHtml ? '<span style="color:var(--text-muted);font-size:13px;">Liên hệ admin qua kênh hỗ trợ của shop</span>' : ''}
+          </div>
+        </div>
+      `
       successInfo.style.display = 'block'
       return
     }
@@ -401,8 +449,8 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
 
     waitTitle.textContent = 'Thanh toán thành công'
     waitDesc.innerHTML = isNetflixPlan
-      ? 'Hệ thống đang chọn tài khoản phù hợp...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 15 giây</small>'
-      : 'Hệ thống đang chuẩn bị sản phẩm...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 15 giây</small>'
+      ? 'Hệ thống đang chọn tài khoản phù hợp...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 3 giây</small>'
+      : 'Hệ thống đang chuẩn bị sản phẩm...<br><small style="color:var(--text-secondary)">Tự động kiểm tra mỗi 3 giây</small>'
     successInfo.style.display = 'block'
 
     const maxLinkWait = Date.now() + 30 * 60 * 1000
@@ -434,7 +482,7 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
           anchor.textContent = info.loginLink
         }
       } catch (_) {}
-    }, 15000)
+    }, 3000)
   }
 
   function stopPolling() {
@@ -529,4 +577,197 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
 
   startTick()
   checkStatus()
+}
+
+/** Hiển thị màn hình chọn phương thức thanh toán khi có đủ số dư ví */
+function showWalletPayOption(container, plan, planId, walletBalance, sellerStoreId, opts = {}) {
+  const { bankName, bankAccount, bankOwner, vietqrBin, momoNumber, momoName,
+          storeSlug, paymentSource, sessionKey, transferContent, payOpts } = opts
+
+  const isEnough = walletBalance >= plan.price
+  const user = getUser()
+  const needsManualRequest = isManualServicePlan(plan)
+  const manualRequestHtml = needsManualRequest ? `
+          <div class="manual-service-request">
+            <div class="manual-service-request__head">
+              <strong>Thông tin để admin xử lý</strong>
+              <span>Không bắt buộc</span>
+            </div>
+            <label class="manual-service-field">
+              <span>Email / tài khoản muốn nâng cấp</span>
+              <input id="manualServiceEmail" type="email" value="${escapeAttr(user?.email || '')}" placeholder="email@example.com" autocomplete="email">
+            </label>
+            <label class="manual-service-field">
+              <span>Ghi chú cho admin</span>
+              <textarea id="manualServiceNote" rows="4" maxlength="2000" placeholder="Ví dụ: Nâng cấp email này, giữ tên kênh, cần gói gia đình, liên hệ qua Telegram @username..."></textarea>
+            </label>
+          </div>
+  ` : ''
+  
+  container.innerHTML = `
+    <section class="payment-section">
+      <div class="page-container" style="max-width:560px;margin:0 auto;padding:40px 16px;">
+        <div class="payment-card" style="text-align:center;">
+          <div style="font-size:42px;margin-bottom:12px;">💳</div>
+          <h1 style="font-size:22px;font-weight:800;margin-bottom:6px;">Chọn phương thức thanh toán</h1>
+          <p style="color:var(--text-secondary);font-size:14px;margin-bottom:24px;">
+            Gói <strong>${plan.name}</strong> — ${formatVND(plan.price)}
+          </p>
+
+          ${manualRequestHtml}
+
+          <!-- Wallet option -->
+          <div id="walletOption" style="border:2px solid ${isEnough ? '#4F46E5' : 'var(--border)'};border-radius:16px;padding:22px;margin-bottom:16px;transition:background .2s;" ${isEnough ? 'onclick="this.style.background=\'var(--primary-light,#EEF2FF)\'"' : ''}>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+              <div style="font-size:16px;font-weight:700;color:${isEnough ? '#4F46E5' : 'var(--text-primary)'};">💰 Thanh toán bằng ví</div>
+              <span style="font-size:11px;background:${isEnough ? '#4F46E5' : 'var(--text-muted)'};color:#fff;padding:2px 8px;border-radius:99px;font-weight:700;">ƯU TIÊN</span>
+            </div>
+            <div style="font-size:14px;color:var(--text-secondary);margin-bottom:14px;text-align:left;">
+              Số dư hiện có: <strong style="${isEnough ? 'color:#10B981;' : ''}font-size:16px;">${formatVND(walletBalance)}</strong>
+              &nbsp;→&nbsp; ${isEnough ? `Còn lại: <strong>${formatVND(walletBalance - plan.price)}</strong>` : `<span style="color:var(--danger)">Thiếu: <strong>${formatVND(plan.price - walletBalance)}</strong></span>`}
+            </div>
+            ${isEnough 
+              ? `<button id="btnWalletPay" class="btn btn-primary" style="width:100%;padding:13px;font-size:16px;font-weight:700;border-radius:10px;">
+                  ⚡ Thanh toán ngay ${formatVND(plan.price)}
+                 </button>`
+              : `<a href="#/wallet" class="btn btn-outline" style="display:block;width:100%;padding:13px;font-size:15px;border-radius:10px;">
+                  Nạp thêm tiền vào ví
+                 </a>`
+            }
+          </div>
+
+          <!-- Separator -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;color:var(--text-muted);font-size:13px;">
+            <div style="flex:1;height:1px;background:var(--border);"></div>
+            hoặc
+            <div style="flex:1;height:1px;background:var(--border);"></div>
+          </div>
+
+          <!-- Bank option -->
+          <button id="btnUseBankTransfer" class="btn btn-outline" style="width:100%;padding:13px;font-size:15px;border-radius:10px;">
+            🏦 Chuyển khoản ngân hàng
+          </button>
+
+          <div style="margin-top:16px;">
+            ${!isEnough ? `<a href="#/wallet" style="font-size:13px;color:var(--primary);">Quản lý ví →</a>` : `<a href="#/wallet" style="font-size:13px;color:var(--primary);">Nạp thêm tiền vào ví →</a>`}
+          </div>
+
+          <div id="walletPayMsg" style="display:none;margin-top:16px;padding:12px;border-radius:10px;font-size:14px;"></div>
+        </div>
+      </div>
+    </section>
+  `
+
+  // Wallet pay handler
+  const btnWallet = container.querySelector('#btnWalletPay')
+  if (btnWallet) {
+    btnWallet.addEventListener('click', async () => {
+      const msg = container.querySelector('#walletPayMsg')
+      btnWallet.disabled = true
+      btnWallet.textContent = '⏳ Đang xử lý...'
+      msg.style.display = 'none'
+
+      try {
+        const result = await payWithWallet(planId, sellerStoreId, getManualServiceRequest(container))
+        // Clear session nếu có
+        if (sessionKey) { try { sessionStorage.removeItem(sessionKey) } catch (_) {} }
+
+        const isManual = !result.login_link && plan.fulfillment_type === 'manual'
+        if (result.login_link) {
+          container.querySelector('.payment-card').innerHTML = `
+            <div style="font-size:56px;margin-bottom:14px;">&#9989;</div>
+            <h2 style="font-size:20px;font-weight:800;color:var(--text-primary);margin-bottom:8px;">Thanh toán thành công!</h2>
+            <p style="color:var(--text-secondary);margin-bottom:18px;">Tài khoản của bạn đã sẵn sàng.</p>
+            <div style="background:var(--bg-muted);border-radius:10px;padding:14px;margin-bottom:20px;word-break:break-all;font-size:14px;">
+              <strong>Link / Nội dung:</strong><br>
+              <a href="${result.login_link}" target="_blank" style="color:var(--primary);font-weight:600;">${result.login_link}</a>
+            </div>
+            <div style="display:flex;gap:10px;justify-content:center;">
+              <a href="#/dashboard" class="btn btn-primary">Xem đơn hàng</a>
+              <a href="#/" class="btn btn-outline">Về trang chủ</a>
+            </div>
+            <p style="margin-top:14px;font-size:13px;color:var(--text-muted);">Số dư còn lại: ${formatVND(result.balance_after)}</p>
+          `
+        } else {
+          // Manual service OR no link yet — show contact info
+          const cfg = window.__siteSettings || {}
+          const tgLink   = cfg.contact_telegram || cfg.telegram_link || ''
+          const zaloLink = cfg.contact_zalo     || cfg.zalo_link     || ''
+          const tgHtml = tgLink
+            ? `<a href="${tgLink}" target="_blank" rel="noopener"
+                  style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;
+                         background:#229ED9;color:#fff;border-radius:10px;font-weight:700;
+                         font-size:14px;text-decoration:none;margin:4px;">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.95 8.15l-2.02 9.54c-.15.68-.54.84-1.09.52l-3-2.21-1.45 1.39c-.16.16-.29.29-.6.29l.21-3.02 5.51-4.98c.24-.21-.05-.33-.37-.12L5.93 13.6 2.97 12.7c-.66-.21-.67-.66.14-.97l11.64-4.49c.55-.2 1.03.13.86.91z"/></svg>
+                  Liên hệ Telegram
+               </a>` : ''
+          const zaloHtml = zaloLink
+            ? `<a href="${zaloLink}" target="_blank" rel="noopener"
+                  style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;
+                         background:#0068FF;color:#fff;border-radius:10px;font-weight:700;
+                         font-size:14px;text-decoration:none;margin:4px;">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="12"/><path fill="#fff" d="M17 8.5c0-2.49-2.24-4.5-5-4.5S7 6.01 7 8.5c0 1.68.99 3.14 2.5 3.95-.1.37-.33.98-.75 1.55 1.1-.22 1.95-.8 2.48-1.31.26.03.51.05.77.05 2.76 0 5-2.01 5-4.24z"/></svg>
+                  Liên hệ Zalo
+               </a>` : ''
+          container.querySelector('.payment-card').innerHTML = `
+            <div style="font-size:56px;margin-bottom:14px;">&#127881;</div>
+            <h2 style="font-size:20px;font-weight:800;color:var(--text-primary);margin-bottom:8px;">Thanh toán thành công!</h2>
+            <p style="color:var(--text-secondary);margin-bottom:18px;line-height:1.6;">
+              Đơn <strong>${plan.name}</strong> đã được ghi nhận.<br>
+              Vui lòng liên hệ admin để nhận dịch vụ:
+            </p>
+            <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-bottom:20px;">
+              ${tgHtml}
+              ${zaloHtml}
+              ${!tgHtml && !zaloHtml ? '<p style="color:var(--text-muted);font-size:13px;">Liên hệ admin qua kênh hỗ trợ của shop</p>' : ''}
+            </div>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">Số dư còn lại: ${formatVND(result.balance_after)}</p>
+            <div style="display:flex;gap:10px;justify-content:center;">
+              <a href="#/dashboard" class="btn btn-primary">Xem đơn hàng</a>
+              <a href="#/" class="btn btn-outline">Về trang chủ</a>
+            </div>
+          `
+        }
+      } catch (err) {
+        btnWallet.disabled = false
+        btnWallet.textContent = `⚡ Thanh toán ngay ${formatVND(plan.price)}`
+        msg.style.display = 'block'
+        msg.style.background = '#FEF2F2'
+        msg.style.color = '#DC2626'
+        msg.textContent = '❌ ' + (err.message || 'Thanh toán thất bại')
+      }
+    })
+  }
+
+  // Switch to bank transfer
+  container.querySelector('#btnUseBankTransfer').addEventListener('click', async () => {
+    const user = getUser()
+    if (!user) { navigate('/login'); return }
+    const manualRequest = getManualServiceRequest(container)
+    container.innerHTML = '<div class="loading"><div class="spinner"></div></div>'
+    try {
+      const subscription = await createSubscription(user.id, planId, {
+        ...(payOpts || {}),
+        ...manualRequest
+      })
+      const tc = transferContent || generateTransferContent()
+      await createPayment(user.id, subscription.id, plan.price, planId, 'bank', tc, payOpts || {})
+      const newSession = {
+        transferContent: tc,
+        subscriptionId: subscription.id,
+        orderCode: subscription.id.replace(/-/g, '').substring(0, 8).toUpperCase()
+      }
+      if (sessionKey) sessionStorage.setItem(sessionKey, JSON.stringify(newSession))
+      showWaitingUI(container, plan, planId, tc, sessionKey, {
+        bankName, bankAccount, bankOwner, vietqrBin, momoNumber, momoName,
+        orderCode: newSession.orderCode, storeSlug: storeSlug || '',
+        paymentSource: paymentSource || 'site', sellerStoreId
+      })
+    } catch (err) {
+      container.innerHTML = `<div style="text-align:center;padding:80px 20px;">
+        <p style="color:red;">Lỗi: ${err.message}</p>
+        <a href="#/plans" class="btn btn-primary" style="margin-top:12px;">Thử lại</a>
+      </div>`
+    }
+  })
 }

@@ -1,8 +1,37 @@
-import { supabase } from '../supabase.js'
+/**
+ * src/utils/auth.js
+ * Custom auth dùng MongoDB + JWT (không dùng Supabase)
+ * API: POST /api/auth/login | /api/auth/register | /api/auth/logout | GET /api/auth/me
+ */
 
-// ==================== AUTH STATE ====================
-let currentUser = null
-let currentProfile = null
+const TOKEN_KEY = 'nx_auth_token'
+const USER_KEY  = 'nx_auth_user'
+
+// ── Storage helpers ──────────────────────────────────────
+function saveSession(token, user) {
+  localStorage.setItem(TOKEN_KEY, token)
+  localStorage.setItem(USER_KEY, JSON.stringify(user))
+}
+
+function clearSession() {
+  localStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(USER_KEY)
+}
+
+export function getStoredToken() {
+  return localStorage.getItem(TOKEN_KEY) || null
+}
+
+export function getStoredUser() {
+  try {
+    const raw = localStorage.getItem(USER_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+// ── Auth state ───────────────────────────────────────────
+let currentUser    = getStoredUser()
+let currentProfile = getStoredUser()   // same object — contains role, email
 const listeners = []
 
 export function onAuthChange(cb) {
@@ -17,105 +46,93 @@ function notifyListeners() {
   listeners.forEach(cb => cb(currentUser, currentProfile))
 }
 
-let lastAuthEvent = null
-export function getLastAuthEvent() { return lastAuthEvent }
-
-export async function initAuth() {
-  const { data: { session } } = await supabase.auth.getSession()
-  if (session?.user) {
-    currentUser = session.user
-    await fetchProfile()
-    notifyListeners()
-  }
-
-  supabase.auth.onAuthStateChange(async (event, session) => {
-    lastAuthEvent = event
-    if (session?.user) {
-      currentUser = session.user
-      await fetchProfile()
-    } else {
-      currentUser = null
-      currentProfile = null
-    }
-    notifyListeners()
-    // Dispatch custom event cho main.js xử lý callback
-    window.dispatchEvent(new CustomEvent('supabaseAuthEvent', { detail: { event, session } }))
-  })
-}
-
-async function fetchProfile() {
-  if (!currentUser) return
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', currentUser.id)
-    .single()
-  if (!error) currentProfile = data
-  // Nếu lỗi (RLS, row not found...) currentProfile giữ nguyên null — isAdmin/isStaff trả false
-}
-
-export function getUser() {
-  return currentUser
-}
-
-export function getProfile() {
-  return currentProfile
-}
-
-export function isAdmin() {
-  return currentProfile?.role === 'admin'
-}
-
-/** Returns true for admin or employee — kept for future staff-only routes */
-export function isStaff() {
-  return currentProfile?.role === 'admin' || currentProfile?.role === 'employee'
-}
-
-export function isLoggedIn() {
-  return !!currentUser
-}
-
-// ==================== AUTH ACTIONS ====================
-export async function signUp(email, password) {
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      // Tự động dùng domain hiện tại — localhost khi dev, IP/domain khi production
-      emailRedirectTo: window.location.origin
-    }
-  })
-  if (error) throw error
+// ── API call helper ──────────────────────────────────────
+async function apiCall(path, options = {}) {
+  const token = getStoredToken()
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(path, { ...options, headers })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`)
   return data
 }
 
+// ── Init (chạy khi app khởi động) ───────────────────────
+export async function initAuth() {
+  const token = getStoredToken()
+  if (!token) {
+    currentUser = null
+    currentProfile = null
+    notifyListeners()
+    return
+  }
+  // Verify token còn hợp lệ không
+  try {
+    const data = await apiCall('/api/auth/me')
+    currentUser    = data.user
+    currentProfile = data.user
+    saveSession(token, data.user)
+  } catch {
+    // Token hết hạn / invalid → clear
+    clearSession()
+    currentUser    = null
+    currentProfile = null
+  }
+  notifyListeners()
+}
+
+// ── Auth actions ─────────────────────────────────────────
 export async function signIn(email, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-  if (error) throw error
-  currentUser = data.user
-  await fetchProfile()
+  const data = await apiCall('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  })
+  saveSession(data.token, data.user)
+  currentUser    = data.user
+  currentProfile = data.user
   notifyListeners()
   return data
 }
 
+export async function signUp(email, password) {
+  const data = await apiCall('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  })
+  saveSession(data.token, data.user)
+  currentUser    = data.user
+  currentProfile = data.user
+  notifyListeners()
+  // Trả về object có session để tương thích với Login.js logic
+  return { session: { user: data.user }, user: data.user }
+}
+
 export async function signOut() {
-  await supabase.auth.signOut()
-  currentUser = null
+  try { await apiCall('/api/auth/logout', { method: 'POST' }) } catch { /* ignore */ }
+  clearSession()
+  currentUser    = null
   currentProfile = null
   notifyListeners()
 }
 
-/** Gửi lại email xác nhận (dùng khi user chưa confirm) */
-export async function resendConfirmation(email) {
-  const { error } = await supabase.auth.resend({ type: 'signup', email })
-  if (error) throw error
+/** Gửi lại email xác nhận — không cần thiết khi dùng MongoDB auth, no-op */
+export async function resendConfirmation(_email) {
+  // MongoDB auth không dùng email confirmation
+  return
 }
 
-/** Gửi email reset mật khẩu */
+/** Reset password — gửi email reset nếu có SMTP */
 export async function resetPassword(email) {
-  const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: window.location.origin + '/#/reset-password'
+  await apiCall('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ email })
   })
-  if (error) throw error
 }
 
+// ── Getters ──────────────────────────────────────────────
+export function getUser()     { return currentUser }
+export function getProfile()  { return currentProfile }
+export function isAdmin()     { return currentProfile?.role === 'admin' }
+export function isStaff()     { return currentProfile?.role === 'admin' || currentProfile?.role === 'employee' }
+export function isLoggedIn()  { return !!currentUser }
+export function getLastAuthEvent() { return null }

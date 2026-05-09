@@ -11,9 +11,13 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint \"src/**/*.js\" server.cjs eslint.config.js",
-    "server": "node server.cjs",
+    "server": "node --tls-max-v1.2 --openssl-config=openssl.cnf server.cjs",
+    "seed": "node scripts/seed-plans.cjs",
+    "mongo:indexes": "node scripts/create-mongo-indexes.cjs",
+    "mongo:test": "node scripts/test-mongo-connection.cjs",
+    "test:all": "node scripts/test-all.cjs",
     "migrate:viewer-reports": "node scripts/run-viewer-reports-migration.cjs",
-    "start": "npm run build && node server.cjs"
+    "start": "npm run build && node --tls-max-v1.2 --openssl-config=openssl.cnf server.cjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -27,10 +31,12 @@
     "@fontsource/plus-jakarta-sans": "^5.2.8",
     "@supabase/supabase-js": "^2.100.1",
     "axios": "^1.13.6",
+    "bcryptjs": "^2.4.3",
     "dotenv": "^17.3.1",
     "express": "^4.22.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^7.2.0",
     "nodemailer": "^8.0.5",
-    "pg": "^8.20.0",
     "resend": "^6.9.4"
   }
 }

@@ -18,7 +18,6 @@ const SECTIONS = [
   { id: 'webhook', label: 'Webhook' },
   { id: 'admin', label: 'Admin' },
   { id: 'seller', label: 'Seller / đại lý' },
-  { id: 'supabase', label: 'Supabase' },
 ]
 
 export function renderApiDocs(container, _params) {
@@ -102,7 +101,7 @@ export function renderApiDocs(container, _params) {
                 <div class="adoc-format-item">
                   <span class="adoc-format-key">Auth (admin/seller)</span>
                   <code class="adoc-inline-code">Authorization: Bearer &lt;access_token&gt;</code>
-                  <span class="adoc-format-note">Supabase JWT sau đăng nhập</span>
+                  <span class="adoc-format-note">MongoDB JWT sau đăng nhập</span>
                 </div>
                 <div class="adoc-format-item">
                   <span class="adoc-format-key">Admin secret</span>
@@ -201,23 +200,6 @@ export function renderApiDocs(container, _params) {
                 { method:'PUT',   path:'/api/seller/plan-prices', desc:'Body: <code>{ "prices": { "month": 60000, … } }</code> — mỗi giá ≥ giá gốc.', res:'{ success, plans }' },
                 { method:'GET',   path:'/api/seller/stats',       desc:'Thống kê đơn qua gian hàng.',                                              res:'JSON' },
               ])}
-            </div>
-          </section>
-
-          <!-- SUPABASE -->
-          <section class="adoc-section" id="adoc-supabase">
-            <div class="adoc-section-head adoc-section-head--blue">
-              <span class="adoc-section-icon">${ICON_DB}</span>
-              <h2 class="adoc-section-title">Supabase (frontend direct)</h2>
-            </div>
-            <div class="adoc-section-body">
-              <div class="adoc-info-box">
-                <p>
-                  App web đọc/ghi trực tiếp <strong>Supabase</strong> (bảng <code>plans</code>, <code>subscriptions</code>, …) bằng
-                  <code>VITE_SUPABASE_ANON_KEY</code> và RLS. Nếu bạn tự code web riêng với cùng project Supabase,
-                  cần tuân RLS và luật bảo mật — không nằm trong bảng API Express phía trên.
-                </p>
-              </div>
             </div>
           </section>
 

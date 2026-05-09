@@ -19,6 +19,7 @@ export function statusLabel(status) {
   const map = {
     active: 'Hoạt động',
     pending: 'Chờ xử lý',
+    processing: 'Chờ admin',
     expired: 'Hết hạn',
     cancelled: 'Đã hủy',
     success: 'Thành công',
@@ -34,6 +35,7 @@ export function statusClass(status) {
   const map = {
     active: 'status-active',
     pending: 'status-pending',
+    processing: 'status-pending',
     expired: 'status-expired',
     cancelled: 'status-expired',
     success: 'status-active',

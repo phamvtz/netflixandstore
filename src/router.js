@@ -11,6 +11,7 @@ const PAGE_TITLES = {
   '/movies':    'Gợi ý phim — Netflix Store',
   '/login':     'Đăng nhập — Netflix Store',
   '/dashboard': 'Tài khoản của tôi — Netflix Store',
+  '/wallet':    'Ví của tôi — Netflix Store',
   '/admin':     'Quản trị — Netflix Store',
   '/tools':     'Tiện ích Netflix — Netflix Store',
   '/payment':   'Thanh toán — Netflix Store',
@@ -34,7 +35,11 @@ export function navigate(path) {
 }
 
 export function getHashPath() {
-  return window.location.hash.slice(1) || '/'
+  const raw = window.location.hash.slice(1) || '/'
+  if (raw.startsWith('settings-')) {
+    return `/admin?tab=settings&section=${encodeURIComponent(raw)}`
+  }
+  return raw.startsWith('/') ? raw : `/${raw}`
 }
 
 
@@ -96,7 +101,7 @@ export async function handleRoute() {
   }
 
   // 5. Route guards
-  const protectedRoutes = ['/dashboard', '/admin']
+  const protectedRoutes = ['/dashboard', '/wallet', '/admin', '/support']
   const isProtected = protectedRoutes.some(r => hash.startsWith(r))
 
   const guestOnlyRoutes = ['/login', '/register']
@@ -150,9 +155,15 @@ export async function handleRoute() {
     if (myVersion !== routeVersion) return
     container.classList.add('page-enter')
     container.addEventListener('animationend', () => container.classList.remove('page-enter'), { once: true })
-    // Scroll reveal cho elements mới
     observeReveal(container)
   })
+
+  // 10. Track page view (fire and forget)
+  fetch('/api/track-visit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: hash }),
+  }).catch(() => {})
 }
 
 export function initRouter() {

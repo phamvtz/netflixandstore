@@ -16,12 +16,19 @@ dist-ssr
 .vscode/*
 !.vscode/extensions.json
 .idea
+.claude/
 .DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Generated/local artifacts
+repomix-output.xml
+src/pages/repomix-output.xml
+tmp-*.png
+netflix@*
 
 # Secrets — KHÔNG push lên GitHub
 .env

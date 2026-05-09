@@ -5,6 +5,7 @@ module.exports = {
     {
       name: 'netflix-store',
       script: 'server.cjs',
+      node_args: ['--tls-max-v1.2', '--openssl-config=openssl.cnf'],
       instances: 1,
       autorestart: true,
       watch: false,
@@ -21,4 +22,3 @@ module.exports = {
     }
   ]
 }
-

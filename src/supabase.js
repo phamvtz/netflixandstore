@@ -1,7 +1,6 @@
-import { createClient } from '@supabase/supabase-js'
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
-
+/**
+ * src/supabase.js
+ * Stub — Supabase đã được thay thế bằng MongoDB + JWT auth.
+ * File này giữ lại để tránh lỗi import ở các file cũ chưa update.
+ */
+export const supabase = null

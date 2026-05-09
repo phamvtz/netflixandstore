@@ -1,7 +1,7 @@
 /** Ngữ cảnh gian hàng khi khách vào từ #/s/:slug — dùng khi tạo subscription/payment */
 export const CHECKOUT_STORE_KEY = 'nf_checkout_store'
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const OBJECTID_RE = /^[0-9a-f]{24}$/i
 
 /** @returns {{ id: string, slug: string } | null} */
 export function getCheckoutStore() {
@@ -10,7 +10,7 @@ export function getCheckoutStore() {
     if (!raw) return null
     const j = JSON.parse(raw)
     const id = j?.id
-    if (typeof id !== 'string' || !UUID_RE.test(id)) return null
+    if (typeof id !== 'string' || !OBJECTID_RE.test(id)) return null
     return { id, slug: typeof j.slug === 'string' ? j.slug : '' }
   } catch {
     return null

@@ -1,173 +1,282 @@
 /**
- * Tab Admin — quản lý bài hướng dẫn (settings.guides_config)
+ * Admin tab: manage guide page content stored in settings.guides_config.
  */
 import { adminPatchSettings } from '../utils/api.js'
 import { showConfirm } from '../utils/confirm.js'
 import { parseGuidesConfig, normalizeGuidePost, slugifyTitle, youtubeUrlToEmbed } from '../utils/guides.js'
 import { markdownLiteToHtml } from '../utils/markdownLite.js'
 
-function escapeHtml(s) {
-  return String(s ?? '')
+function escapeHtml(value) {
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 }
 
-function escapeAttr(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/"/g, '&quot;')
 }
 
-export function renderAdminGuides(panel, settings) {
-  const cfg = parseGuidesConfig(settings?.guides_config)
-  let posts = cfg.posts.map(normalizeGuidePost).sort((a, b) => a.order - b.order)
-  let editingId = null
+function sortPosts(rows) {
+  return rows.map(normalizeGuidePost).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title))
+}
 
-  function syncPostsToForm() {
-    posts = posts.map(normalizeGuidePost).sort((a, b) => a.order - b.order)
+function buildGuidesConfig(panel, posts) {
+  return {
+    introTitle: panel.querySelector('#guidesIntroTitle')?.value?.trim() || 'Hướng dẫn sử dụng',
+    introSubtitle: panel.querySelector('#guidesIntroSubtitle')?.value?.trim() || '',
+    posts: sortPosts(posts).map(post => ({ ...post })),
+  }
+}
+
+export function renderAdminGuides(panel, settings = {}, options = {}) {
+  const cfg = parseGuidesConfig(settings?.guides_config)
+  let posts = sortPosts(cfg.posts)
+  let editingId = null
+  let saving = false
+
+  function selectedPost() {
+    return posts.find(post => post.id === editingId) || null
   }
 
-  function cfgToSave() {
-    return {
-      introTitle: panel.querySelector('#guidesIntroTitle')?.value?.trim() || 'Hướng dẫn sử dụng',
-      introSubtitle: panel.querySelector('#guidesIntroSubtitle')?.value ?? '',
-      posts: posts.map(p => ({ ...p }))
+  function setBusy(button, busy, label) {
+    if (!button) return
+    if (busy) {
+      button.dataset.oldLabel = button.textContent
+      button.disabled = true
+      button.textContent = label
+    } else {
+      button.disabled = false
+      button.textContent = button.dataset.oldLabel || button.textContent
+      delete button.dataset.oldLabel
     }
   }
 
-  function renderTable() {
-    const tb = panel.querySelector('#guidesPostsBody')
-    if (!tb) return
-    tb.innerHTML = posts.length
-      ? posts.map((p, idx) => `
-        <tr data-id="${escapeAttr(p.id)}">
-          <td>${idx + 1}</td>
-          <td><strong>${escapeHtml(p.title)}</strong><br><code style="font-size:11px;">${escapeHtml(p.slug)}</code></td>
-          <td>${youtubeUrlToEmbed(p.youtubeUrl) ? '<span class="status-badge status-active" title="Có video">▶ YT</span>' : '—'}</td>
-          <td>${p.published !== false ? '<span class="status-badge status-active">Hiện</span>' : '<span class="status-badge status-expired">Ẩn</span>'}</td>
-          <td>${p.order}</td>
-          <td>
-            <button type="button" class="btn btn-sm btn-outline guides-edit" data-id="${escapeAttr(p.id)}">Sửa</button>
-            <button type="button" class="btn btn-sm btn-danger guides-del" data-id="${escapeAttr(p.id)}">Xóa</button>
-          </td>
-        </tr>`).join('')
-      : '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px;">Chưa có bài. Nhấn «Thêm bài».</td></tr>'
+  async function persist(message, resultEl) {
+    if (saving) return false
+    saving = true
+    const next = buildGuidesConfig(panel, posts)
+    try {
+      await adminPatchSettings({ guides_config: JSON.stringify(next) })
+      options.onSaved?.(next)
+      if (resultEl) {
+        resultEl.textContent = message
+        resultEl.classList.remove('error')
+      }
+      window.showToast?.(message, 'success')
+      return true
+    } catch (err) {
+      if (resultEl) {
+        resultEl.textContent = err.message || 'Không lưu được cấu hình hướng dẫn.'
+        resultEl.classList.add('error')
+      }
+      window.showToast?.(err.message || 'Không lưu được cấu hình hướng dẫn.', 'error')
+      return false
+    } finally {
+      saving = false
+    }
   }
 
-  function refreshVideoPreview() {
+  function renderStats() {
+    const total = posts.length
+    const published = posts.filter(post => post.published !== false).length
+    const withVideo = posts.filter(post => youtubeUrlToEmbed(post.youtubeUrl)).length
+    const statEl = panel.querySelector('#guidesStats')
+    if (!statEl) return
+    statEl.innerHTML = `
+      <div><span>Tổng bài</span><strong>${total}</strong></div>
+      <div><span>Đang hiện</span><strong>${published}</strong></div>
+      <div><span>Có video</span><strong>${withVideo}</strong></div>
+    `
+  }
+
+  function renderTable() {
+    const body = panel.querySelector('#guidesPostsBody')
+    if (!body) return
+    body.innerHTML = posts.length
+      ? posts.map((post, index) => {
+          const active = post.id === editingId
+          return `
+            <tr class="${active ? 'active' : ''}" data-id="${escapeAttr(post.id)}">
+              <td class="ag-table-index">${index + 1}</td>
+              <td>
+                <strong>${escapeHtml(post.title)}</strong>
+                <code>${escapeHtml(post.slug)}</code>
+              </td>
+              <td>${youtubeUrlToEmbed(post.youtubeUrl) ? '<span class="ag-pill ok">Video</span>' : '<span class="ag-muted">Không</span>'}</td>
+              <td>${post.published !== false ? '<span class="ag-pill live">Hiện</span>' : '<span class="ag-pill off">Ẩn</span>'}</td>
+              <td>${post.order}</td>
+              <td>
+                <div class="ag-row-actions">
+                  <button type="button" class="btn btn-sm btn-outline guides-edit" data-id="${escapeAttr(post.id)}">Sửa</button>
+                  <button type="button" class="btn btn-sm btn-danger guides-del" data-id="${escapeAttr(post.id)}">Xóa</button>
+                </div>
+              </td>
+            </tr>
+          `
+        }).join('')
+      : `
+        <tr>
+          <td colspan="6">
+            <div class="ag-empty">
+              <strong>Chưa có bài hướng dẫn</strong>
+              <span>Bấm Thêm bài để tạo bài đầu tiên cho trang công khai.</span>
+            </div>
+          </td>
+        </tr>
+      `
+    renderStats()
+  }
+
+  function renderVideoPreview() {
     const url = panel.querySelector('#guidesEdYt')?.value?.trim() || ''
     const wrap = panel.querySelector('#guidesVideoPreview')
     const hint = panel.querySelector('#guidesYtHint')
     if (!wrap) return
     const embed = youtubeUrlToEmbed(url)
     if (hint) {
-      hint.textContent = embed ? '✓ Link hợp lệ — video sẽ hiển thị trên trang công khai.' : url ? '⚠ Không nhận dạng được link YouTube (watch / youtu.be / shorts / embed).' : 'Dán link đầy đủ, ví dụ: https://www.youtube.com/watch?v=...'
-      hint.style.color = embed ? 'var(--secondary-hover)' : url ? 'var(--warning)' : 'var(--text-muted)'
+      hint.textContent = embed
+        ? 'Link hợp lệ. Video sẽ hiện trên trang hướng dẫn.'
+        : url
+          ? 'Không nhận dạng được link YouTube. Hỗ trợ watch, youtu.be, shorts và embed.'
+          : 'Để trống nếu bài chỉ cần nội dung chữ.'
+      hint.classList.toggle('ok', Boolean(embed))
+      hint.classList.toggle('warn', Boolean(url && !embed))
     }
-    if (embed) {
-      wrap.innerHTML = `<div class="admin-guides-video-frame"><iframe class="admin-guides-video-iframe" src="${embed}" title="Xem trước video" allowfullscreen loading="lazy"></iframe></div>`
-    } else {
-      wrap.innerHTML = url ? '<p class="admin-guides-video-empty">Không xem trước được — kiểm tra lại URL.</p>' : '<p class="admin-guides-video-empty">Chưa có link — khách chỉ thấy nội dung chữ.</p>'
-    }
+    wrap.innerHTML = embed
+      ? `<div class="admin-guides-video-frame"><iframe class="admin-guides-video-iframe" src="${escapeAttr(embed)}" title="Xem trước video" allowfullscreen loading="lazy"></iframe></div>`
+      : `<p class="admin-guides-video-empty">${url ? 'Không xem trước được. Kiểm tra lại URL.' : 'Chưa có link video.'}</p>`
   }
 
-  function fillEditor(p) {
-    panel.querySelector('#guidesEdId').value = p.id
-    panel.querySelector('#guidesEdTitle').value = p.title
-    panel.querySelector('#guidesEdSlug').value = p.slug
-    panel.querySelector('#guidesEdBody').value = p.bodyMd
-    panel.querySelector('#guidesEdYt').value = p.youtubeUrl || ''
-    panel.querySelector('#guidesEdOrder').value = String(p.order)
-    panel.querySelector('#guidesEdPublished').checked = p.published !== false
-    const prev = panel.querySelector('#guidesPreview')
-    if (prev) prev.innerHTML = markdownLiteToHtml(p.bodyMd)
-    refreshVideoPreview()
+  function renderMarkdownPreview() {
+    const preview = panel.querySelector('#guidesPreview')
+    const value = panel.querySelector('#guidesEdBody')?.value || ''
+    if (preview) preview.innerHTML = value.trim() ? markdownLiteToHtml(value) : '<p class="ag-muted">Nhập nội dung để xem trước.</p>'
+  }
+
+  function fillEditor(post) {
+    editingId = post?.id || null
+    panel.querySelector('#guidesEdId').value = post?.id || ''
+    panel.querySelector('#guidesEdTitle').value = post?.title || ''
+    panel.querySelector('#guidesEdSlug').value = post?.slug || ''
+    panel.querySelector('#guidesEdOrder').value = String(post?.order ?? posts.length)
+    panel.querySelector('#guidesEdPublished').checked = post?.published !== false
+    panel.querySelector('#guidesEdYt').value = post?.youtubeUrl || ''
+    panel.querySelector('#guidesEdBody').value = post?.bodyMd || ''
+    panel.querySelector('#guidesEditorTitle').textContent = post ? 'Sửa bài hướng dẫn' : 'Thêm bài mới'
+    panel.querySelector('#guidesSavePost').textContent = post ? 'Lưu thay đổi' : 'Tạo bài'
+    renderVideoPreview()
+    renderMarkdownPreview()
+    renderTable()
   }
 
   function clearEditor() {
-    editingId = null
-    panel.querySelector('#guidesEdId').value = ''
-    panel.querySelector('#guidesEdTitle').value = ''
-    panel.querySelector('#guidesEdSlug').value = ''
-    panel.querySelector('#guidesEdBody').value = ''
-    panel.querySelector('#guidesEdYt').value = ''
-    panel.querySelector('#guidesEdOrder').value = String(posts.length)
-    panel.querySelector('#guidesEdPublished').checked = true
-    const prev = panel.querySelector('#guidesPreview')
-    if (prev) prev.innerHTML = ''
-    refreshVideoPreview()
-    panel.querySelector('#guidesEditorTitle').textContent = 'Thêm / sửa bài'
+    fillEditor(null)
   }
 
   panel.innerHTML = `
-    <div class="admin-form-card" style="margin-bottom:var(--sp-5);">
-      <h3 class="admin-section-title">Tiêu đề trang hướng dẫn</h3>
-      <div class="op-form-grid" style="margin-top:var(--sp-3);">
-        <div class="form-group" style="margin:0;">
-          <label class="op-label">Tiêu đề chính</label>
-          <input type="text" id="guidesIntroTitle" class="admin-filter" value="${escapeAttr(cfg.introTitle)}">
+    <div class="ag-page">
+      <section class="ag-card ag-intro-card">
+        <div class="ag-card-head">
+          <div>
+            <span class="ag-kicker">Trang công khai</span>
+            <h3>Tiêu đề trang hướng dẫn</h3>
+            <p>Thông tin này hiện ở đầu trang #/guides.</p>
+          </div>
+          <button type="button" class="btn btn-primary" id="guidesSaveIntro">Lưu phần đầu trang</button>
         </div>
-        <div class="form-group" style="margin:0;grid-column:1/-1;">
-          <label class="op-label">Mô tả phụ (dòng dưới tiêu đề)</label>
-          <input type="text" id="guidesIntroSubtitle" class="admin-filter" value="${escapeAttr(cfg.introSubtitle)}">
+        <div class="ag-intro-grid">
+          <label class="ag-field">
+            <span>Tiêu đề chính</span>
+            <input type="text" id="guidesIntroTitle" value="${escapeAttr(cfg.introTitle)}">
+          </label>
+          <label class="ag-field ag-field--wide">
+            <span>Mô tả phụ</span>
+            <input type="text" id="guidesIntroSubtitle" value="${escapeAttr(cfg.introSubtitle)}">
+          </label>
         </div>
-      </div>
-      <button type="button" class="btn btn-primary" id="guidesSaveIntro" style="margin-top:var(--sp-3);">💾 Lưu phần đầu trang</button>
-      <p id="guidesIntroResult" style="font-size:13px;margin-top:8px;"></p>
-    </div>
+        <p class="ag-result" id="guidesIntroResult" aria-live="polite"></p>
+      </section>
 
-    <div class="admin-form-card">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
-        <h3 class="admin-section-title" style="margin:0;">Danh sách bài</h3>
-        <button type="button" class="btn btn-success" id="guidesAddPost">➕ Thêm bài</button>
-      </div>
-      <div class="admin-table-wrap" style="margin-top:var(--sp-4);">
-        <table class="data-table">
-          <thead><tr><th>#</th><th>Tiêu đề / Slug</th><th>Video</th><th>Trạng thái</th><th>Thứ tự</th><th></th></tr></thead>
-          <tbody id="guidesPostsBody"></tbody>
-        </table>
-      </div>
+      <div class="ag-layout">
+        <section class="ag-card ag-list-card">
+          <div class="ag-card-head">
+            <div>
+              <span class="ag-kicker">Danh sách bài</span>
+              <h3>Bài hướng dẫn</h3>
+              <p>Quản lý thứ tự, trạng thái hiển thị và video đính kèm.</p>
+            </div>
+            <button type="button" class="btn btn-success" id="guidesAddPost">Thêm bài</button>
+          </div>
+          <div class="ag-stats" id="guidesStats"></div>
+          <div class="ag-table-wrap">
+            <table class="ag-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Tiêu đề / slug</th>
+                  <th>Video</th>
+                  <th>Trạng thái</th>
+                  <th>Thứ tự</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="guidesPostsBody"></tbody>
+            </table>
+          </div>
+        </section>
 
-      <div id="guidesEditorWrap" style="margin-top:var(--sp-6);padding-top:var(--sp-5);border-top:1px solid var(--border);">
-        <h4 id="guidesEditorTitle" style="margin:0 0 var(--sp-4);">Thêm / sửa bài</h4>
-        <input type="hidden" id="guidesEdId" value="">
-        <div class="op-form-grid">
-          <div class="form-group" style="margin:0;">
-            <label class="op-label">Tiêu đề</label>
-            <input type="text" id="guidesEdTitle" class="admin-filter" placeholder="VD: Cách thanh toán">
+        <aside class="ag-card ag-editor-card" id="guidesEditorWrap">
+          <div class="ag-card-head ag-card-head--compact">
+            <div>
+              <span class="ag-kicker">Biên tập</span>
+              <h3 id="guidesEditorTitle">Thêm bài mới</h3>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline" id="guidesCancelEd">Làm mới</button>
           </div>
-          <div class="form-group" style="margin:0;">
-            <label class="op-label">Slug (URL)</label>
-            <input type="text" id="guidesEdSlug" class="admin-filter" placeholder="vd: cach-thanh-toan">
+          <input type="hidden" id="guidesEdId" value="">
+
+          <div class="ag-editor-grid">
+            <label class="ag-field ag-field--wide">
+              <span>Tiêu đề</span>
+              <input type="text" id="guidesEdTitle" placeholder="VD: Cách thanh toán">
+            </label>
+            <label class="ag-field">
+              <span>Slug URL</span>
+              <input type="text" id="guidesEdSlug" placeholder="vd: cach-thanh-toan">
+            </label>
+            <label class="ag-field">
+              <span>Thứ tự</span>
+              <input type="number" id="guidesEdOrder" value="0" min="0">
+            </label>
+            <label class="ag-check ag-field--wide">
+              <input type="checkbox" id="guidesEdPublished" checked>
+              <span>Xuất bản trên website</span>
+            </label>
+            <label class="ag-field ag-field--wide">
+              <span>Video YouTube</span>
+              <input type="url" id="guidesEdYt" placeholder="https://www.youtube.com/watch?v=...">
+            </label>
+            <p class="ag-help ag-field--wide" id="guidesYtHint"></p>
+            <div class="ag-field ag-field--wide">
+              <span>Xem trước video</span>
+              <div id="guidesVideoPreview" class="admin-guides-video-preview"></div>
+            </div>
+            <label class="ag-field ag-field--wide">
+              <span>Nội dung Markdown</span>
+              <textarea id="guidesEdBody" rows="12" placeholder="## Phần 1&#10;&#10;Nội dung..."></textarea>
+            </label>
+            <div class="ag-field ag-field--wide">
+              <span>Xem trước nội dung</span>
+              <div id="guidesPreview" class="guides-body prose-like admin-guides-preview"></div>
+            </div>
           </div>
-          <div class="form-group" style="margin:0;">
-            <label class="op-label">Thứ tự hiển thị</label>
-            <input type="number" id="guidesEdOrder" class="admin-filter" value="0" min="0">
+
+          <div class="ag-editor-actions">
+            <button type="button" class="btn btn-primary" id="guidesSavePost">Tạo bài</button>
+            <p class="ag-result" id="guidesPostResult" aria-live="polite"></p>
           </div>
-          <div class="form-group" style="margin:0;display:flex;align-items:center;gap:8px;padding-top:22px;">
-            <input type="checkbox" id="guidesEdPublished" checked>
-            <label for="guidesEdPublished" style="margin:0;font-weight:600;">Xuất bản (hiện trên site)</label>
-          </div>
-          <div class="form-group" style="margin:0;grid-column:1/-1;">
-            <label class="op-label">Video YouTube (tùy chọn) — nhúng xem trên trang hướng dẫn</label>
-            <input type="url" id="guidesEdYt" class="admin-filter" placeholder="https://www.youtube.com/watch?v=... hoặc https://youtu.be/...">
-            <p id="guidesYtHint" style="font-size:12px;margin-top:6px;color:var(--text-muted);"></p>
-            <p class="op-label" style="margin:var(--sp-3) 0 var(--sp-2);">Xem trước video</p>
-            <div id="guidesVideoPreview" class="admin-guides-video-preview"></div>
-          </div>
-          <div class="form-group" style="margin:0;grid-column:1/-1;">
-            <label class="op-label">Nội dung — Markdown (## tiêu đề, **đậm**, \`code\`, [text](url), danh sách - )</label>
-            <textarea id="guidesEdBody" class="acc-textarea" rows="14" placeholder="## Phần 1&#10;&#10;Nội dung..."></textarea>
-          </div>
-        </div>
-        <p class="op-label" style="margin:var(--sp-3) 0 var(--sp-2);">Xem trước</p>
-        <div id="guidesPreview" class="guides-body prose-like admin-guides-preview"></div>
-        <div style="display:flex;gap:8px;margin-top:var(--sp-4);flex-wrap:wrap;">
-          <button type="button" class="btn btn-primary" id="guidesSavePost">💾 Lưu bài</button>
-          <button type="button" class="btn btn-outline" id="guidesCancelEd">Huỷ</button>
-        </div>
-        <p id="guidesPostResult" style="font-size:13px;margin-top:8px;"></p>
+        </aside>
       </div>
     </div>
   `
@@ -175,117 +284,124 @@ export function renderAdminGuides(panel, settings) {
   renderTable()
   clearEditor()
 
-  panel.querySelector('#guidesEdBody')?.addEventListener('input', () => {
-    const prev = panel.querySelector('#guidesPreview')
-    if (prev) prev.innerHTML = markdownLiteToHtml(panel.querySelector('#guidesEdBody').value)
-  })
-  panel.querySelector('#guidesEdYt')?.addEventListener('input', refreshVideoPreview)
+  panel.querySelector('#guidesEdBody')?.addEventListener('input', renderMarkdownPreview)
+  panel.querySelector('#guidesEdYt')?.addEventListener('input', renderVideoPreview)
   panel.querySelector('#guidesEdTitle')?.addEventListener('input', () => {
-    if (!editingId && !panel.querySelector('#guidesEdSlug').value.trim()) {
-      panel.querySelector('#guidesEdSlug').value = slugifyTitle(panel.querySelector('#guidesEdTitle').value)
-    }
+    const title = panel.querySelector('#guidesEdTitle')?.value || ''
+    const slugInput = panel.querySelector('#guidesEdSlug')
+    if (!editingId && slugInput && !slugInput.value.trim()) slugInput.value = slugifyTitle(title)
   })
 
-  panel.querySelector('#guidesSaveIntro')?.addEventListener('click', async () => {
-    const resEl = panel.querySelector('#guidesIntroResult')
-    if (resEl) resEl.textContent = ''
-    try {
-      const next = cfgToSave()
-      await adminPatchSettings({ guides_config: JSON.stringify(next) })
-      if (resEl) resEl.textContent = '✅ Đã lưu.'
-      window.showToast?.('Đã lưu phần đầu trang hướng dẫn', 'success')
-    } catch (e) {
-      if (resEl) resEl.textContent = e.message
-      window.showToast?.(e.message, 'error')
-    }
+  panel.querySelector('#guidesSaveIntro')?.addEventListener('click', async event => {
+    const result = panel.querySelector('#guidesIntroResult')
+    if (result) result.textContent = ''
+    setBusy(event.currentTarget, true, 'Đang lưu...')
+    await persist('Đã lưu phần đầu trang.', result)
+    setBusy(event.currentTarget, false)
   })
 
   panel.querySelector('#guidesAddPost')?.addEventListener('click', () => {
-    editingId = null
     clearEditor()
     panel.querySelector('#guidesEdOrder').value = String(posts.length)
-    panel.querySelector('#guidesEditorWrap').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    panel.querySelector('#guidesEditorWrap')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     panel.querySelector('#guidesEdTitle')?.focus()
   })
 
   panel.querySelector('#guidesCancelEd')?.addEventListener('click', () => clearEditor())
 
-  panel.querySelector('#guidesPostsBody')?.addEventListener('click', async e => {
-    const editB = e.target.closest('.guides-edit')
-    const delB = e.target.closest('.guides-del')
-    if (editB) {
-      const id = editB.dataset.id
-      const p = posts.find(x => x.id === id)
-      if (!p) return
-      editingId = id
-      panel.querySelector('#guidesEditorTitle').textContent = 'Sửa bài'
-      fillEditor(p)
-      panel.querySelector('#guidesEditorWrap').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  panel.querySelector('#guidesPostsBody')?.addEventListener('click', async event => {
+    const editBtn = event.target.closest('.guides-edit')
+    const deleteBtn = event.target.closest('.guides-del')
+
+    if (editBtn) {
+      const post = posts.find(item => item.id === editBtn.dataset.id)
+      if (!post) return
+      fillEditor(post)
+      panel.querySelector('#guidesEditorWrap')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
       return
     }
-    if (delB) {
-      const id = delB.dataset.id
-      const ok = await showConfirm('Xóa bài hướng dẫn', 'Bài sẽ gỡ khỏi site ngay sau khi xóa.', 'Xóa', 'Huỷ', 'danger')
+
+    if (deleteBtn) {
+      const post = posts.find(item => item.id === deleteBtn.dataset.id)
+      if (!post) return
+      const ok = await showConfirm('Xóa bài hướng dẫn', 'Bài sẽ bị gỡ khỏi trang hướng dẫn ngay sau khi xóa.', 'Xóa', 'Hủy', 'danger')
       if (!ok) return
-      posts = posts.filter(x => x.id !== id)
-      syncPostsToForm()
+      const before = posts
+      posts = posts.filter(item => item.id !== post.id)
+      if (editingId === post.id) editingId = null
       renderTable()
-      if (editingId === id) clearEditor()
-      ;(async () => {
-        try {
-          await adminPatchSettings({ guides_config: JSON.stringify(cfgToSave()) })
-          window.showToast?.('Đã xóa bài', 'success')
-        } catch (e) {
-          window.showToast?.(e.message, 'error')
-        }
-      })()
+      const saved = await persist('Đã xóa bài hướng dẫn.', panel.querySelector('#guidesPostResult'))
+      if (!saved) {
+        posts = before
+        renderTable()
+      } else if (!selectedPost()) {
+        clearEditor()
+      }
     }
   })
 
-  panel.querySelector('#guidesSavePost')?.addEventListener('click', async () => {
-    const resEl = panel.querySelector('#guidesPostResult')
-    if (resEl) resEl.textContent = ''
-    const title = panel.querySelector('#guidesEdTitle').value.trim()
-    let slug = panel.querySelector('#guidesEdSlug').value.trim().toLowerCase().replace(/^\/+|\/+$/g, '')
+  panel.querySelector('#guidesSavePost')?.addEventListener('click', async event => {
+    const result = panel.querySelector('#guidesPostResult')
+    if (result) {
+      result.textContent = ''
+      result.classList.remove('error')
+    }
+
+    const title = panel.querySelector('#guidesEdTitle')?.value.trim() || ''
+    let slug = panel.querySelector('#guidesEdSlug')?.value.trim().toLowerCase().replace(/^\/+|\/+$/g, '') || ''
     if (!title) {
-      if (resEl) resEl.textContent = 'Nhập tiêu đề.'
+      if (result) {
+        result.textContent = 'Nhập tiêu đề bài.'
+        result.classList.add('error')
+      }
       return
     }
     if (!slug) slug = slugifyTitle(title)
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
-      if (resEl) resEl.textContent = 'Slug chỉ gồm chữ thường, số và gạch ngang.'
+      if (result) {
+        result.textContent = 'Slug chỉ gồm chữ thường, số và gạch ngang.'
+        result.classList.add('error')
+      }
       return
     }
 
-    const body = {
-      id: panel.querySelector('#guidesEdId').value.trim() || slugifyTitle(title) + '-' + Date.now().toString(36),
+    const id = panel.querySelector('#guidesEdId')?.value.trim() || `${slug}-${Date.now().toString(36)}`
+    if (posts.some(post => post.slug === slug && post.id !== id)) {
+      if (result) {
+        result.textContent = 'Slug đã tồn tại.'
+        result.classList.add('error')
+      }
+      return
+    }
+
+    const nextPost = normalizeGuidePost({
+      id,
       slug,
       title,
-      bodyMd: panel.querySelector('#guidesEdBody').value,
-      youtubeUrl: panel.querySelector('#guidesEdYt').value.trim(),
-      order: parseInt(panel.querySelector('#guidesEdOrder').value, 10) || 0,
-      published: panel.querySelector('#guidesEdPublished').checked,
-      updatedAt: new Date().toISOString()
-    }
+      order: Number.parseInt(panel.querySelector('#guidesEdOrder')?.value, 10) || 0,
+      published: panel.querySelector('#guidesEdPublished')?.checked !== false,
+      youtubeUrl: panel.querySelector('#guidesEdYt')?.value.trim() || '',
+      bodyMd: panel.querySelector('#guidesEdBody')?.value || '',
+      updatedAt: new Date().toISOString(),
+    })
 
-    if (posts.some(p => p.slug === slug && p.id !== body.id)) {
-      if (resEl) resEl.textContent = 'Slug đã tồn tại.'
-      return
-    }
-    const normalized = normalizeGuidePost(body)
-    const ix = posts.findIndex(p => p.id === normalized.id)
-    if (ix >= 0) posts[ix] = normalized
-    else posts.push(normalized)
-    syncPostsToForm()
+    const before = posts
+    const index = posts.findIndex(post => post.id === nextPost.id)
+    posts = index >= 0
+      ? posts.map(post => post.id === nextPost.id ? nextPost : post)
+      : [...posts, nextPost]
+    posts = sortPosts(posts)
+    editingId = nextPost.id
     renderTable()
-    try {
-      const next = cfgToSave()
-      await adminPatchSettings({ guides_config: JSON.stringify(next) })
-      window.showToast?.('Đã lưu bài hướng dẫn', 'success')
+
+    setBusy(event.currentTarget, true, 'Đang lưu...')
+    const saved = await persist('Đã lưu bài hướng dẫn.', result)
+    setBusy(event.currentTarget, false)
+    if (saved) {
       clearEditor()
-    } catch (e) {
-      if (resEl) resEl.textContent = e.message
-      window.showToast?.(e.message, 'error')
+    } else {
+      posts = before
+      renderTable()
     }
   })
 }

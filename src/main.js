@@ -38,19 +38,19 @@ toastStyles.textContent = `
   }
   .toast-item {
     display: flex; align-items: center; gap: 10px;
-    background: #1F2937; color: #F9FAFB;
-    padding: 12px 18px; border-radius: 10px;
-    font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 14px; font-weight: 500;
-    box-shadow: 0 8px 24px rgba(0,0,0,.2);
+    background: #1C1C1E; color: #EDEDED;
+    padding: 12px 18px; border-radius: 16px;
+    font-family: 'Inter', -apple-system, system-ui, sans-serif; font-size: 14px; font-weight: 500;
+    box-shadow: 0 8px 32px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,0.08);
     pointer-events: auto;
     transform: translateX(110%);
     transition: transform .3s cubic-bezier(.34,1.56,.64,1);
     max-width: 340px;
-    border-left: 3px solid #4F46E5;
+    border-left: 3px solid #0071E3;
   }
-  .toast-item.toast-success { border-left-color: #22C55E; }
-  .toast-item.toast-error   { border-left-color: #EF4444; }
-  .toast-item.toast-warning { border-left-color: #F59E0B; }
+  .toast-item.toast-success { border-left-color: #34C759; }
+  .toast-item.toast-error   { border-left-color: #FF453A; }
+  .toast-item.toast-warning { border-left-color: #FFD60A; }
   .toast-item.show          { transform: translateX(0); }
 `
 document.head.appendChild(toastStyles)
@@ -78,13 +78,16 @@ async function applySEO() {
   try {
     const s = await getSettings()
     if (!s) return
-    window.__siteSettings = s
-    if (s.site_title)       document.title = s.site_title
-    if (s.meta_description) setMeta('description', s.meta_description)
-    if (s.meta_keywords)    setMeta('keywords',     s.meta_keywords)
-    if (s.site_name)        setMeta('og:site_name', s.site_name, 'property')
+    // getSettings trả về { settings: {...} } hoặc trực tiếp object
+    const cfg = s.settings || s
+    window.__siteSettings = cfg
+    if (cfg.site_title)       document.title = cfg.site_title
+    if (cfg.meta_description) setMeta('description', cfg.meta_description)
+    if (cfg.meta_keywords)    setMeta('keywords',     cfg.meta_keywords)
+    if (cfg.site_name)        setMeta('og:site_name', cfg.site_name, 'property')
     // Notify Footer + Navbar để re-render với settings mới
     window.dispatchEvent(new Event('siteSettingsLoaded'))
+    setTimeout(() => showSiteNotice(cfg), 350)
   } catch {}
 }
 
@@ -94,19 +97,112 @@ function setMeta(name, content, attr = 'name') {
   el.setAttribute('content', content)
 }
 
-// ── Xử lý Supabase auth callback (email confirmation, password reset) ────────
-function handleSupabaseAuthCallback() {
-  const hash = window.location.hash
-  if (!hash || !hash.includes('access_token=')) return null
+const NOTICE_DISMISS_KEY = 'site_notice_dismissed_today'
 
-  const params = new URLSearchParams(hash.slice(1))
-  const type = params.get('type') // 'signup' | 'recovery' | 'email_change'
+function showSiteNotice(cfg = {}) {
+  if (!truthy(cfg.notice_enabled)) return
+  if ((window.location.hash.replace(/^#/, '') || '/').startsWith('/admin')) return
 
-  // Xoá token khỏi URL ngay — Supabase đã đọc rồi
-  window.history.replaceState(null, '', window.location.pathname)
+  const title = String(cfg.notice_title || '').trim()
+  const body = String(cfg.notice_body || '').trim()
+  if (!title && !body) return
 
-  return type
+  const signature = noticeSignature(cfg)
+  if (noticeHiddenToday(signature)) return
+  document.getElementById('siteNoticeOverlay')?.remove()
+
+  const ctaUrl = safeNoticeUrl(cfg.notice_cta_url)
+  const ctaLabel = String(cfg.notice_cta_label || '').trim() || 'Xem ngay'
+  const overlay = document.createElement('div')
+  overlay.id = 'siteNoticeOverlay'
+  overlay.className = 'site-notice-overlay'
+  overlay.innerHTML = `
+    <div class="site-notice" role="dialog" aria-modal="true" aria-labelledby="siteNoticeTitle">
+      <button type="button" class="site-notice-close" data-notice-close aria-label="Đóng">×</button>
+      <div class="site-notice-kicker">Thông báo</div>
+      <h2 id="siteNoticeTitle">${escapeHtml(title || 'Thông báo')}</h2>
+      ${body ? `<div class="site-notice-body">${escapeHtml(body).replace(/\n/g, '<br>')}</div>` : ''}
+      <div class="site-notice-actions">
+        ${ctaUrl ? `<a class="btn btn-primary" href="${escapeAttr(ctaUrl)}" data-notice-close>${escapeHtml(ctaLabel)}</a>` : ''}
+        <button type="button" class="btn btn-outline" data-notice-hide-today>Ẩn hôm nay</button>
+      </div>
+    </div>
+  `
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay || event.target.closest('[data-notice-close]')) {
+      overlay.remove()
+      return
+    }
+    if (event.target.closest('[data-notice-hide-today]')) {
+      hideNoticeToday(signature)
+      overlay.remove()
+    }
+  })
+  document.addEventListener('keydown', function onNoticeKey(event) {
+    if (event.key !== 'Escape') return
+    overlay.remove()
+    document.removeEventListener('keydown', onNoticeKey)
+  })
+  document.body.appendChild(overlay)
 }
+
+function truthy(value) {
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(String(value || '').toLowerCase())
+}
+
+function todayLocalKey() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function noticeHiddenToday(signature) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(NOTICE_DISMISS_KEY) || '{}')
+    return saved.signature === signature && saved.date === todayLocalKey()
+  } catch {
+    return false
+  }
+}
+
+function hideNoticeToday(signature) {
+  try {
+    localStorage.setItem(NOTICE_DISMISS_KEY, JSON.stringify({ signature, date: todayLocalKey() }))
+  } catch {}
+}
+
+function noticeSignature(cfg) {
+  const raw = [
+    cfg.notice_title || '',
+    cfg.notice_body || '',
+    cfg.notice_cta_label || '',
+    cfg.notice_cta_url || ''
+  ].join('|')
+  let hash = 0
+  for (let i = 0; i < raw.length; i++) hash = ((hash << 5) - hash + raw.charCodeAt(i)) | 0
+  return String(hash)
+}
+
+function safeNoticeUrl(value) {
+  const url = String(value || '').trim()
+  if (!url) return ''
+  if (url.startsWith('#/') || url.startsWith('/') || /^https?:\/\//i.test(url)) return url
+  return ''
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/"/g, '&quot;')
+}
+
 
 // ── Tên miền riêng: Host trùng seller_stores.custom_domain → vào thẳng gian hàng ──
 async function resolveCustomDomainBeforeRouter() {
@@ -126,9 +222,6 @@ async function resolveCustomDomainBeforeRouter() {
 
 // ── Init ─────────────────────────────────────────────────────
 async function init() {
-  // Detect Supabase auth callback TRƯỚC khi init (trước khi router chạy)
-  const authCallbackType = handleSupabaseAuthCallback()
-
   await Promise.all([initAuth(), applySEO()])
   await resolveCustomDomainBeforeRouter()
 
@@ -138,28 +231,18 @@ async function init() {
   registerRoute('/movies', lazyRoute(() => import('./pages/MovieSuggestions.js'), 'renderMovieSuggestions'))
   registerRoute('/login', lazyRoute(() => import('./pages/Login.js'), 'renderLogin'))
   registerRoute('/dashboard', lazyRoute(() => import('./pages/Dashboard.js'), 'renderDashboard'))
+  registerRoute('/wallet', lazyRoute(() => import('./pages/Wallet.js'), 'renderWallet'))
   registerRoute('/payment/:id', lazyRoute(() => import('./pages/Payment.js'), 'renderPayment'))
   registerRoute('/admin', lazyRoute(() => import('./pages/Admin.js'), 'renderAdmin'))
   registerRoute('/tools', lazyRoute(() => import('./pages/Tools.js'), 'renderTools'))
   registerRoute('/guides', lazyRoute(() => import('./pages/Guides.js'), 'renderGuides'))
+  registerRoute('/support', lazyRoute(() => import('./pages/Support.js'), 'renderSupport'))
   registerRoute('/guides/:slug', lazyRoute(() => import('./pages/Guides.js'), 'renderGuides'))
   registerRoute('/s/:slug', lazyRoute(() => import('./pages/Storefront.js'), 'renderStorefront'))
   registerRoute('/api-docs', lazyRoute(() => import('./pages/ApiDocs.js'), 'renderApiDocs'))
 
   renderNavbar()
   renderFooter()
-
-  // Xử lý sau khi router đã đăng ký routes
-  if (authCallbackType === 'signup') {
-    // Email confirmation thành công → vào dashboard + toast
-    window.location.hash = '#/dashboard'
-    setTimeout(() => showToast('✅ Email đã xác nhận! Chào mừng bạn đến với Netflix Store.', 'success', 5000), 300)
-  } else if (authCallbackType === 'recovery') {
-    // Password reset — về login
-    window.location.hash = '#/login'
-    setTimeout(() => showToast('🔑 Bạn có thể đặt lại mật khẩu ngay bây giờ.', 'info', 4000), 300)
-  }
-  // Luôn khởi động router (hash đã được set ở trên nếu cần)
   initRouter()
 }
 

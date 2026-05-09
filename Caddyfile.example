@@ -1,0 +1,11 @@
+# Đổi email + domain rồi copy thành C:\caddy\Caddyfile (hoặc: copy /Y Caddyfile.example C:\caddy\Caddyfile)
+# Chạy: cd /d C:\caddy && caddy.exe run --config Caddyfile
+
+{
+	email you@example.com
+}
+
+gmaxpre.com, www.gmaxpre.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3001
+}
