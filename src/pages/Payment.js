@@ -290,7 +290,10 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
               <div class="order-detail"><span>Số tiền:</span><strong>${formatVND(plan.price)}</strong></div>
               <div class="order-detail" id="loginLinkRow" style="display:none;">
                 <span>${isNetflixPlan ? 'Link đăng nhập:' : 'Nội dung:'}</span>
-                <a id="loginLinkAnchor" href="#" target="_blank" class="price-highlight" style="word-break:break-all;"></a>
+                <div class="payment-login-content">
+                  <a id="loginLinkAnchor" href="#" target="_blank" rel="noopener" class="payment-login-link"></a>
+                  <button type="button" class="btn-copy payment-login-copy" id="loginLinkCopy">Copy</button>
+                </div>
               </div>
             </div>
             <div style="margin-top:24px;">
@@ -312,10 +315,26 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
     </section>
   `
 
+  function copyToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).catch(() => copyFallback(text))
+    }
+    return copyFallback(text)
+  }
+  function copyFallback(text) {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;pointer-events:none'
+    document.body.appendChild(ta)
+    ta.focus(); ta.select()
+    try { document.execCommand('copy') } finally { document.body.removeChild(ta) }
+    return Promise.resolve()
+  }
+
   const copyButton = container.querySelector('#tcCopy')
   if (copyButton) {
     copyButton.addEventListener('click', () => {
-      navigator.clipboard.writeText(transferContent)
+      copyToClipboard(transferContent)
       copyButton.textContent = 'Đã copy'
       copyButton.style.background = 'var(--secondary)'
       copyButton.style.borderColor = 'var(--secondary)'
@@ -328,6 +347,20 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
       }, 1800)
     })
   }
+
+  container.addEventListener('click', event => {
+    const copyLinkButton = event.target.closest?.('#loginLinkCopy')
+    if (!copyLinkButton) return
+
+    const value = copyLinkButton.dataset.copy || container.querySelector('#loginLinkAnchor')?.textContent || ''
+    if (!value) return
+
+    copyToClipboard(value)
+    copyLinkButton.textContent = 'Đã copy'
+    setTimeout(() => {
+      copyLinkButton.textContent = 'Copy'
+    }, 1800)
+  })
 
   const maxWaitMs = 900_000
   const pollInterval = 3_000
@@ -438,10 +471,12 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
       }
       const row = container.querySelector('#loginLinkRow')
       const anchor = container.querySelector('#loginLinkAnchor')
+      const copy = container.querySelector('#loginLinkCopy')
       if (row && anchor) {
         row.style.display = 'flex'
         anchor.href = data.loginLink
         anchor.textContent = data.loginLink
+        if (copy) copy.dataset.copy = data.loginLink
       }
       successInfo.style.display = 'block'
       return
@@ -476,10 +511,12 @@ function showWaitingUI(container, plan, planId, transferContent, sessionKey, ban
 
         const row = container.querySelector('#loginLinkRow')
         const anchor = container.querySelector('#loginLinkAnchor')
+        const copy = container.querySelector('#loginLinkCopy')
         if (row && anchor) {
           row.style.display = 'flex'
           anchor.href = info.loginLink
           anchor.textContent = info.loginLink
+          if (copy) copy.dataset.copy = info.loginLink
         }
       } catch (_) {}
     }, 3000)

@@ -93,6 +93,25 @@ function hasPaymentIssue(data) {
   return !!(data.paymentError || data.paymentFailed || data.payment_error || data.payment_failed)
 }
 
+function getLoginLinkErrorMessage(res = {}) {
+  if (res.reason === 'cookie_dead') {
+    return 'Tài khoản bị mất phiên đăng nhập. Vui lòng bấm <strong>Bảo hành</strong> để được cấp lại.'
+  }
+  if (res.reason === 'plan_lost') {
+    return 'Gói dịch vụ không còn hiệu lực. Vui lòng bấm <strong>Bảo hành</strong> để kiểm tra.'
+  }
+  return 'Không thể lấy link lúc này. Vui lòng bấm <strong>Bảo hành</strong> nếu lỗi tiếp tục.'
+}
+
+function getWarrantyErrorMessage(res = {}) {
+  if (res.reason === 'already_used') return 'Đơn đã được bảo hành trước đó.'
+  if (res.reason === 'expired') return 'Đơn đã hết hạn, không đủ điều kiện bảo hành.'
+  if (res.reason === 'out_of_scope' || res.aliveAndHasPlan) {
+    return 'Lỗi không thuộc phạm vi bảo hành, vui lòng liên hệ hỗ trợ.'
+  }
+  return res.message || 'Không thể bảo hành. Vui lòng liên hệ hỗ trợ.'
+}
+
 function updateDashboardStats(container, subs = []) {
   const now = Date.now()
   const active = subs.filter(s => s.status === 'active' && !subscriptionAccessExpired(s)).length
@@ -377,8 +396,6 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
   </div>
   <div class="sub-list" id="dashSubList">`
 
-  const planCheckBySub = new Map()
-
   subs.forEach(sub => {
     html += buildSubCardHtml(sub, renewGridHtml, noticesBySubId)
   })
@@ -456,12 +473,28 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
   applySubscriptionFilters()
 
   // ===== COPY =====
+  async function copyToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return } catch {}
+    }
+    copyFallback(text)
+  }
+  function copyFallback(text) {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;pointer-events:none'
+    document.body.appendChild(ta)
+    ta.focus(); ta.select()
+    try { document.execCommand('copy') } finally { document.body.removeChild(ta) }
+    return Promise.resolve()
+  }
+
   panel.querySelectorAll('.btn-copy').forEach(btn => {
     btn.addEventListener('click', () => {
-      navigator.clipboard.writeText(btn.dataset.copy)
-      const orig = btn.textContent
-      btn.textContent = '&#x2705;'
-      setTimeout(() => btn.textContent = orig, 1500)
+      copyToClipboard(btn.dataset.copy)
+      const orig = btn.innerHTML
+      btn.innerHTML = '&#x2705;'
+      setTimeout(() => btn.innerHTML = orig, 1500)
     })
   })
 
@@ -485,17 +518,7 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
       const resultEl = panel.querySelector('#result-link-' + subId)
 
       if (!cookie) {
-        showResult(resultEl, 'error', '&#x274C; Tài khoản này chỉ có email/mật khẩu, không có cookie Netflix.')
-        return
-      }
-
-      const stLink = planCheckBySub.get(subId)
-      if (stLink && stLink.alive === false) {
-        showResult(resultEl, 'error', '&#x274C; <strong>Không thể xem / lấy link:</strong> cookie Netflix đã hết hiệu lực. Bấm <strong>Bảo hành</strong>.')
-        return
-      }
-      if (stLink && stLink.hasPremium === false) {
-        showResult(resultEl, 'error', '&#x274C; <strong>Không thể xem / lấy link:</strong> tài khoản không còn gói Premium. Bấm <strong>Bảo hành</strong>.')
+        showResult(resultEl, 'error', '&#x274C; Tài khoản bị mất phiên đăng nhập. Vui lòng bấm <strong>Bảo hành</strong> để được cấp lại.')
         return
       }
 
@@ -508,206 +531,22 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
           resultEl.innerHTML = '<div class="result-success"><div class="result-title">&#x2705; Login Link của bạn:</div><div class="result-link-row"><input type="text" value="' + res.link + '" readonly class="result-link-input" id="final-link-' + subId + '"><button class="btn btn-sm btn-primary copy-final-link" data-link="' + res.link + '">&#x1F4CB; Copy</button></div><a href="' + res.link + '" target="_blank" rel="noopener" class="btn btn-sm btn-outline" style="margin-top:8px;display:inline-block;">&#x1F680; Mở link đăng nhập</a></div>'
           resultEl.style.display = 'block'
           resultEl.querySelector('.copy-final-link')?.addEventListener('click', e => {
-            navigator.clipboard.writeText(e.target.dataset.link)
+            copyToClipboard(e.target.dataset.link)
             e.target.textContent = '&#x2705; Copied!'
             setTimeout(() => e.target.textContent = '&#x1F4CB; Copy', 2000)
           })
         } else {
-          showResult(resultEl, 'error', '&#x274C; ' + (res.message || 'Cookie die hoặc không hợp lệ'))
+          showResult(resultEl, 'error', '&#x274C; ' + getLoginLinkErrorMessage(res))
         }
       } catch (err) {
-        showResult(resultEl, 'error', '&#x274C; Lỗi kết nối: ' + err.message)
-      } finally {
-        const st = planCheckBySub.get(subId)
-        const stillBlocked = st && (st.alive === false || st.hasPremium === false)
-        btn.disabled = !!stillBlocked
-      }
-    })
-  })
-
-  // ===== TV LOGIN =====
-  function clearTvSession(subId) {
-    const submitBtn = panel.querySelector('.acc-tv-submit-btn[data-sub="' + subId + '"]')
-    if (!submitBtn) return
-    delete submitBtn.dataset.authUrl
-    delete submitBtn.dataset.cookie
-  }
-
-  panel.querySelectorAll('.acc-tv-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const subId = btn.dataset.sub
-      let cookie
-      try { cookie = decodeURIComponent(btn.dataset.cookie || '') } catch { cookie = '' }
-      const tvBox = panel.querySelector('#tv-box-' + subId)
-      const resultEl = panel.querySelector('#result-tv-' + subId)
-      if (!tvBox || !resultEl) return
-
-      if (!cookie) {
-        tvBox.style.display = 'block'
-        clearTvSession(subId)
-        showResult(resultEl, 'error', '&#x274C; Tài khoản này không có cookie Netflix.')
-        return
-      }
-
-      if (tvBox.style.display !== 'none') {
-        tvBox.style.display = 'none'
-        clearTvSession(subId)
-        return
-      }
-
-      const stTv = planCheckBySub.get(subId)
-      if (stTv && stTv.alive === false) {
-        tvBox.style.display = 'block'
-        clearTvSession(subId)
-        showResult(resultEl, 'error', '&#x274C; Cookie đã hết hiệu lực. Bấm <strong>Bảo hành</strong> trước.')
-        return
-      }
-
-      tvBox.style.display = 'block'
-      clearTvSession(subId)
-      btn.disabled = true
-      btn.textContent = '&#x23F3;'
-      showResult(resultEl, 'loading', '&#x23F3; Đang kết nối Netflix...')
-
-      try {
-        const init = await apiTvInit(cookie)
-        if (!init.success) {
-          showResult(resultEl, 'error', '&#x274C; ' + (init.message || 'Không khởi tạo được phiên TV'))
-          return
-        }
-        const authUrl = init.authUrl
-        if (!authUrl || typeof authUrl !== 'string') {
-          showResult(resultEl, 'error', '&#x274C; Server không trả về authURL hợp lệ.')
-          return
-        }
-        const submitBtn = panel.querySelector('.acc-tv-submit-btn[data-sub="' + subId + '"]')
-        if (submitBtn) {
-          submitBtn.dataset.authUrl = authUrl
-          submitBtn.dataset.cookie = encodeURIComponent(cookie)
-        }
-        showResult(resultEl, 'success', '&#x2705; Đã kết nối Netflix. Nhập mã trên TV vào ô bên dưới rồi bấm Gửi mã.')
-      } catch (err) {
-        showResult(resultEl, 'error', '&#x274C; Lỗi: ' + err.message)
-      } finally {
-        const st = planCheckBySub.get(subId)
-        const stillBlocked = st && (st.alive === false || st.hasPremium === false)
-        btn.disabled = !!stillBlocked
-        btn.textContent = '&#x1F4FA; Nhập mã TV'
-      }
-    })
-  })
-
-  panel.querySelectorAll('.acc-tv-cancel-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const subId = btn.dataset.sub
-      const tvBox = panel.querySelector('#tv-box-' + subId)
-      if (tvBox) tvBox.style.display = 'none'
-      clearTvSession(subId)
-    })
-  })
-
-  panel.querySelectorAll('.acc-tv-submit-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const subId = btn.dataset.sub
-      const authUrl = btn.dataset.authUrl
-      const cookieEnc = btn.dataset.cookie
-      const resultEl = panel.querySelector('#result-tv-' + subId)
-      const codeInput = panel.querySelector('#tv-code-' + subId)
-
-      if (!authUrl || !cookieEnc) {
-        showResult(resultEl, 'error', '&#x274C; Chưa khởi tạo phiên TV. Bấm nút TV trước.')
-        return
-      }
-      const code = codeInput?.value?.trim()
-      if (!code || !/^\d{6,10}$/.test(code)) {
-        showResult(resultEl, 'error', '&#x274C; Mã TV phải là 6-10 chữ số.')
-        return
-      }
-      const cookie = decodeURIComponent(cookieEnc)
-      btn.disabled = true
-      showResult(resultEl, 'loading', '&#x23F3; Đang gửi mã vào Netflix...')
-
-      try {
-        const res = await apiTvSubmit(cookie, authUrl, code)
-        if (res.success) {
-          showResult(resultEl, 'success', '&#x1F389; ' + (res.message || 'TV đã được đăng nhập!'))
-          if (codeInput) codeInput.value = ''
-          setTimeout(() => {
-            clearTvSession(subId)
-            const box = panel.querySelector('#tv-box-' + subId)
-            if (box) box.style.display = 'none'
-          }, 3000)
-        } else {
-          showResult(resultEl, 'error', '&#x274C; ' + (res.message || 'Netflix từ chối mã'))
-        }
-      } catch (err) {
-        showResult(resultEl, 'error', '&#x274C; Lỗi: ' + err.message)
+        showResult(resultEl, 'error', '&#x274C; Không thể lấy link lúc này. Vui lòng bấm <strong>Bảo hành</strong> nếu lỗi tiếp tục.')
       } finally {
         btn.disabled = false
       }
     })
   })
 
-  // ===== AUTO CHECK PLAN STATUS =====
-  panel.querySelectorAll('.acc-warranty-btn').forEach(btn => {
-    const subId  = btn.dataset.sub
-    const cookie = decodeURIComponent(btn.dataset.cookie)
-    const planStatusEl = panel.querySelector('#plan-status-' + subId)
-    if (!cookie || !planStatusEl) { if (planStatusEl) planStatusEl.innerHTML = ''; return }
-
-    setTimeout(async () => {
-      try {
-        const check = await apiCheckPlanStatus(cookie)
-
-        if (!check.alive) {
-          planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--dead">&#x274C; Cookie đã die - đang tự động đổi tài khoản...</div>'
-          planCheckBySub.set(subId, { alive: false, hasPremium: false, paymentError: false })
-          await triggerWarranty(subId, cookie, panel, renewPlans, 'cookie_dead')
-          return
-        }
-
-        if (!check.hasPremium) {
-          planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--noPlan">&#x26A0;&#xFE0F; Mất gói Premium - đang tự động đổi tài khoản...</div>'
-          planCheckBySub.set(subId, { alive: true, hasPremium: false, paymentError: false })
-          await triggerWarranty(subId, cookie, panel, renewPlans, 'plan_lost')
-          return
-        }
-
-        let paymentError = hasPaymentIssue(check) || hasPaymentIssue(check.raw)
-        let deepPlan = check.plan || 'Premium'
-
-        if (!paymentError) {
-          try {
-            const acct = await apiNetflixAccountInfo(cookie)
-            if (hasPaymentIssue(acct)) {
-              paymentError = true
-              if (acct.plan) deepPlan = acct.plan
-            }
-          } catch { /* ignore */ }
-        }
-
-        if (paymentError) {
-          planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--paymentError">&#x1F6AB; <strong>Lỗi thanh toán</strong> - tài khoản bị hold, đang tự động đổi tài khoản mới...</div>'
-          planCheckBySub.set(subId, { alive: true, hasPremium: true, paymentError: true })
-          await triggerWarranty(subId, cookie, panel, renewPlans, 'payment_error')
-          return
-        }
-
-        planStatusEl.innerHTML = '<div class="acc-plan-alert acc-plan-alert--ok">&#x2705; Gói: <strong>' + deepPlan + '</strong>' + (check.screens ? ' &middot; ' + check.screens + ' màn hình' : '') + '</div>'
-        planCheckBySub.set(subId, { alive: true, hasPremium: true, paymentError: false })
-        const getLinkBtn = panel.querySelector('.acc-get-link-btn[data-sub="' + subId + '"]')
-        const tvBtnEl = panel.querySelector('.acc-tv-btn[data-sub="' + subId + '"]')
-        for (const b of [getLinkBtn, tvBtnEl]) {
-          if (!b) continue
-          b.disabled = false
-          b.removeAttribute('title')
-          b.classList.remove('acc-action-needs-warranty')
-        }
-      } catch {
-        planStatusEl.innerHTML = ''
-      }
-    }, 1200)
-  })
+  // TV LOGIN handlers → xem block đầy đủ bên dưới (tránh duplicate event listener)
 
   async function submitViewerReport(subId, panel) {
     const resultEl = panel.querySelector('#result-warranty-' + subId)
@@ -770,14 +609,19 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
         if (u) {
           const [fresh, nm] = await Promise.all([getUserSubscriptions(u.id), fetchViewerNoticesBySubId()])
           renderSubscriptions(panel, fresh, renewPlans, nm)
+          showResult(
+            panel.querySelector('#result-warranty-' + subId),
+            'success',
+            '\u2705 Bảo hành thành công! Tài khoản đã được cấp lại.'
+          )
         } else {
-          showResult(resultEl, 'success', '\u2705 \u0110\u00e3 \u0111\u1ed5i t\u00e0i kho\u1ea3n. Vui l\u00f2ng t\u1ea3i l\u1ea1i trang.')
+          showResult(resultEl, 'success', '\u2705 Bảo hành thành công! Tài khoản đã được cấp lại.')
         }
       } else {
-        showResult(resultEl, 'error', '\u274c ' + (warranty?.message || 'Kh\u00f4ng th\u1ec3 b\u1ea3o h\u00e0nh. Vui l\u00f2ng li\u00ean h\u1ec7 admin.'))
+        showResult(resultEl, 'error', '\u274c ' + getWarrantyErrorMessage(warranty))
       }
     } catch (err) {
-      showResult(resultEl, 'error', '\u274c L\u1ed7i: ' + err.message)
+      showResult(resultEl, 'error', '\u274c ' + (err.message || 'Lỗi không thuộc phạm vi bảo hành, vui lòng liên hệ hỗ trợ.'))
     } finally {
       if (warrantyBtn) warrantyBtn.disabled = false
     }
@@ -926,11 +770,12 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
         if (vrRejected.resolved_at) cardHtml += '<p class="viewer-report-user-notice__meta">' + formatDate(vrRejected.resolved_at) + '</p>'
         cardHtml += '</div>'
       }
+      const showCreds = ['1','true','yes','on','enabled'].includes(String(window.__siteSettings?.show_netflix_credentials || '').toLowerCase())
       cardHtml += '<div style="display:flex;flex-direction:column;">'
-      if (acc.email) cardHtml += '<div class="premium-acc-row"><span class="premium-acc-label">Email</span><span class="premium-acc-val">' + acc.email + '</span><button class="premium-copy-btn btn-copy" data-copy="' + acc.email + '" title="Copy" style="padding:4px 8px;font-size:11px;">&#x1F4CB; Copy</button></div>'
-      if (acc.password) cardHtml += '<div class="premium-acc-row"><span class="premium-acc-label">Mật khẩu</span><span class="premium-acc-val acc-pass-masked" id="pass-' + sub.id + '">' + maskPassword(acc.password) + '</span><button class="premium-copy-btn btn-toggle-pass acc-icon-btn" data-sub="' + sub.id + '" data-pass="' + encodeURIComponent(acc.password) + '" title="Hiện/Ẩn" style="padding:4px 8px;font-size:11px;">&#x1F441;&#xFE0F; Ẩn/Hiện</button><button class="premium-copy-btn btn-copy" data-copy="' + acc.password + '" title="Copy" style="padding:4px 8px;font-size:11px;">&#x1F4CB; Copy</button></div>'
+      if (showCreds && acc.email) cardHtml += '<div class="premium-acc-row"><span class="premium-acc-label">Email</span><span class="premium-acc-val">' + acc.email + '</span><button class="premium-copy-btn btn-copy" data-copy="' + acc.email + '" title="Copy" style="padding:4px 8px;font-size:11px;">&#x1F4CB; Copy</button></div>'
+      if (showCreds && acc.password) cardHtml += '<div class="premium-acc-row"><span class="premium-acc-label">Mật khẩu</span><span class="premium-acc-val acc-pass-masked" id="pass-' + sub.id + '">' + maskPassword(acc.password) + '</span><button class="premium-copy-btn btn-toggle-pass acc-icon-btn" data-sub="' + sub.id + '" data-pass="' + encodeURIComponent(acc.password) + '" title="Hiện/Ẩn" style="padding:4px 8px;font-size:11px;">&#x1F441;&#xFE0F; Ẩn/Hiện</button><button class="premium-copy-btn btn-copy" data-copy="' + acc.password + '" title="Copy" style="padding:4px 8px;font-size:11px;">&#x1F4CB; Copy</button></div>'
+      if (showCreds && cookie) cardHtml += '<div class="premium-acc-row" style="align-items:flex-start;gap:8px;"><span class="premium-acc-label" style="padding-top:6px;white-space:nowrap;">Cookie</span><textarea readonly style="flex:1;font-size:11px;font-family:monospace;padding:6px 8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:var(--text-primary);resize:none;height:56px;word-break:break-all;line-height:1.4;">' + escHtml(cookie) + '</textarea><button class="premium-copy-btn btn-copy" data-copy="' + escapeAttr(cookie) + '" title="Copy cookie" style="padding:4px 8px;font-size:11px;white-space:nowrap;">&#x1F4CB; Copy</button></div>'
       cardHtml += '</div>'
-      cardHtml += '<div class="acc-plan-status" id="plan-status-' + sub.id + '" style="margin:12px 0;"><span class="acc-plan-checking">&#x23F3; Đang kiểm tra gói...</span></div>'
       cardHtml += '<div class="premium-actions-row">'
       cardHtml += '<button class="btn btn-sm btn-primary acc-get-link-btn" data-sub="' + sub.id + '" data-cookie="' + encodeURIComponent(cookie) + '" style="background:linear-gradient(135deg,#E50914 0%,#B80710 100%)">&#x1F517; Get Login Link</button>'
       cardHtml += '<button class="btn btn-sm btn-outline acc-tv-btn" data-sub="' + sub.id + '" data-cookie="' + encodeURIComponent(cookie) + '">&#x1F4FA; Nhập mã TV</button>'
@@ -1096,6 +941,12 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
                 <span class="premium-acc-val acc-pass-masked" id="pass-${sub.id}">${maskPassword(acc.password)}</span>
                 <button class="premium-copy-btn btn-toggle-pass acc-icon-btn" data-sub="${sub.id}" data-pass="${encodeURIComponent(acc.password)}" title="Hiện/Ẩn" style="padding:4px 8px;font-size:11px;">👁️ Ẩn/Hiện</button>
                 <button class="premium-copy-btn btn-copy" data-copy="${acc.password}" title="Copy" style="padding:4px 8px;font-size:11px;">📋 Copy</button>
+              </div>` : ''}
+              ${cookie ? `
+              <div class="premium-acc-row" style="align-items:flex-start;gap:8px;">
+                <span class="premium-acc-label" style="padding-top:6px;white-space:nowrap;">Cookie</span>
+                <textarea readonly style="flex:1;font-size:11px;font-family:monospace;padding:6px 8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:var(--text-primary);resize:none;height:56px;word-break:break-all;line-height:1.4;">${escHtml(cookie)}</textarea>
+                <button class="premium-copy-btn btn-copy" data-copy="${escapeAttr(cookie)}" title="Copy cookie" style="padding:4px 8px;font-size:11px;white-space:nowrap;">📋 Copy</button>
               </div>` : ''}
             </div>
 
@@ -1504,8 +1355,9 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
 
       try {
         const res = await apiTvSubmit(cookie, authUrl, code)
+        const safeMsg = (s) => String(s || '').replace(/<[^>]*>/g, '').trim()
         if (res.success) {
-          showResult(resultEl, 'success', `🎉 ${res.message || 'TV đã được đăng nhập!'}`)
+          showResult(resultEl, 'success', `🎉 ${safeMsg(res.message) || 'TV đã được đăng nhập!'}`)
           if (codeInput) codeInput.value = ''
           setTimeout(() => {
             clearTvSession(subId)
@@ -1513,10 +1365,10 @@ function renderSubscriptions(panel, subs, renewPlans = [], noticesBySubId = new 
             if (box) box.style.display = 'none'
           }, 3000)
         } else {
-          showResult(resultEl, 'error', `❌ ${res.message || 'Netflix từ chối mã'}`)
+          showResult(resultEl, 'error', `❌ ${safeMsg(res.message) || 'Netflix từ chối mã'}`)
         }
       } catch (err) {
-        showResult(resultEl, 'error', `❌ Lỗi: ${err.message}`)
+        showResult(resultEl, 'error', `❌ Lỗi kết nối, vui lòng thử lại.`)
       } finally {
         btn.disabled = false
       }

@@ -9,7 +9,8 @@ import {
   adminListCatalogProducts,
   adminListCatalogVariants,
   adminUpdateCatalogCategory,
-  adminUpdateCatalogProduct
+  adminUpdateCatalogProduct,
+  adminUpdateCatalogVariant
 } from '../../utils/adminCatalogApi.js'
 import {
   adminAddAccountsBulk,
@@ -137,6 +138,10 @@ async function handleAction(state, actionEl) {
       await createCategory(state)
       return
     }
+    if (action === 'save-category') {
+      await saveCategory(state, actionEl)
+      return
+    }
     if (action === 'delete-category') {
       await deleteCategory(state, actionEl.dataset.categoryId)
       return
@@ -147,6 +152,10 @@ async function handleAction(state, actionEl) {
     }
     if (action === 'add-variant') {
       await addVariant(state, actionEl)
+      return
+    }
+    if (action === 'save-variant') {
+      await saveVariant(state, actionEl)
       return
     }
     if (action === 'delete-variant') {
@@ -265,6 +274,26 @@ async function deleteCategory(state, categoryId) {
   })
 }
 
+async function saveCategory(state, actionEl) {
+  const category = categoryById(state, actionEl.dataset.categoryId)
+  if (!category) throw new Error('Khong tim thay danh muc')
+  const form = actionEl.closest('[data-category-form]')
+  const name = form?.querySelector('[data-category-name]')?.value?.trim() || ''
+  const status = form?.querySelector('[data-category-status]')?.value || 'active'
+  if (!name) throw new Error('Nhap ten danh muc')
+  await runBusy(state, async () => {
+    await adminUpdateCatalogCategory(category.id, { name, status })
+    const products = productsForCategory(state, category.id)
+    await Promise.all(products.map((product) => adminUpdateCatalogProduct(product.id, {
+      name,
+      status: status === 'active' ? 'active' : 'inactive'
+    })))
+    state.result = `Da luu danh muc ${name}`
+    state.onChanged?.()
+    await loadAll(state)
+  })
+}
+
 async function switchCategoryType(state, categoryId, nextType) {
   const category = categoryById(state, categoryId)
   if (!category) throw new Error('Khong tim thay danh muc')
@@ -326,6 +355,30 @@ async function deleteVariant(state, actionEl) {
   await runBusy(state, async () => {
     await adminDeleteCatalogVariant(variant.productId, variant.id)
     state.result = `Đã xóa biến thể ${variant.name}`
+    state.onChanged?.()
+    await loadAll(state)
+  })
+}
+
+async function saveVariant(state, actionEl) {
+  const variant = variantById(state, actionEl.dataset.variantId)
+  if (!variant) throw new Error('Khong tim thay bien the')
+  const row = actionEl.closest('[data-variant-row]')
+  const name = row?.querySelector('[data-variant-edit-name]')?.value?.trim() || ''
+  const cost = numberFromInput(row?.querySelector('[data-variant-edit-cost]')?.value, 'Gia nhap', { min: 0, defaultValue: 0 })
+  const price = numberFromInput(row?.querySelector('[data-variant-edit-price]')?.value, 'Gia ban', { min: 0, required: true })
+  const days = numberFromInput(row?.querySelector('[data-variant-edit-days]')?.value, 'So ngay', { min: 1, integer: true, required: true })
+  const status = row?.querySelector('[data-variant-edit-status]')?.value || 'active'
+  if (!name) throw new Error('Nhap ten bien the')
+  await runBusy(state, async () => {
+    await adminUpdateCatalogVariant(variant.productId, variant.id, {
+      name,
+      price,
+      cost_price: cost,
+      duration_days: days,
+      status
+    })
+    state.result = `Da luu bien the ${name}`
     state.onChanged?.()
     await loadAll(state)
   })
@@ -472,13 +525,18 @@ function renderCategoryCard(state, category) {
     ? `${counts.available} con hang - ${counts.sold} da ban - ${variants.length} bien the`
     : `${variants.length} bien the - don vao Don hang dich vu`
   return `
-    <article class="service-category-card">
+    <article class="service-category-card" data-category-form>
       <header class="service-category-card-head">
         <div>
-          <h2>${esc(category.name)}</h2>
+          <input class="input" data-category-name value="${attr(category.name || '')}" aria-label="Ten danh muc">
           <p><b>${esc(typeLabel)}</b> - ${esc(summary)}</p>
         </div>
         <div class="service-category-actions">
+          <select class="select" data-category-status ${state.busy ? 'disabled' : ''}>
+            <option value="active"${category.status !== 'inactive' ? ' selected' : ''}>Active</option>
+            <option value="inactive"${category.status === 'inactive' ? ' selected' : ''}>Inactive</option>
+          </select>
+          <button class="btn btn-sm btn-primary" data-service-action="save-category" data-category-id="${attr(category.id)}" ${state.busy ? 'disabled' : ''}>Luu</button>
           <button class="btn btn-sm btn-outline" data-service-action="switch-category-type" data-category-id="${attr(category.id)}" data-type="${auto ? 'service' : 'product'}" ${state.busy ? 'disabled' : ''}>${auto ? 'Chuyen sang dich vu' : 'Chuyen sang san pham'}</button>
           <button class="btn btn-sm btn-danger" data-service-action="delete-category" data-category-id="${attr(category.id)}" ${state.busy ? 'disabled' : ''}>Xóa</button>
         </div>
@@ -507,14 +565,22 @@ function renderVariantRow(state, variant, category = null) {
     ? `<b>${counts.available}</b> con <b>${counts.sold}</b> ban <b>${counts.total}</b> tong`
     : '<b>Manual</b> admin xu ly'
   return `
-    <div class="service-variant-row">
+    <div class="service-variant-row" data-variant-row>
       <div>
-        <strong>${esc(variant.name || 'Biến thể')}</strong>
+        <strong style="display:none">${esc(variant.name || 'Bien the')}</strong>
         <span>Nhập ${formatVND(variant.cost_price || 0)} · Bán ${formatVND(variant.price || 0)}</span>
       </div>
       <div class="service-stock-mini">
         ${stockSummary}
       </div>
+      <input class="input" data-variant-edit-name value="${attr(variant.name || '')}" aria-label="Ten bien the">
+      <input class="input" data-variant-edit-cost type="number" min="0" value="${attr(variant.cost_price || 0)}" aria-label="Gia nhap">
+      <input class="input" data-variant-edit-price type="number" min="0" value="${attr(variant.price || 0)}" aria-label="Gia ban">
+      <input class="input" data-variant-edit-days type="number" min="1" value="${attr(variant.duration_days || inferDays(variant.name))}" aria-label="So ngay">
+      <select class="select" data-variant-edit-status ${state.busy ? 'disabled' : ''}>
+        ${['active', 'inactive', 'out_of_stock'].map((status) => `<option value="${status}"${(variant.status || 'active') === status ? ' selected' : ''}>${status}</option>`).join('')}
+      </select>
+      <button class="btn btn-sm btn-primary" data-service-action="save-variant" data-variant-id="${attr(variant.id)}" ${state.busy ? 'disabled' : ''}>Luu</button>
       <button class="btn btn-sm btn-danger" data-service-action="delete-variant" data-variant-id="${attr(variant.id)}" ${state.busy ? 'disabled' : ''}>Xóa</button>
     </div>
   `

@@ -72,9 +72,10 @@ const MBBANK_HISTORY_BASE = String(
 ).replace(/\/$/, '')
 
 /** Fallback STK / chủ TK site khi bảng settings chưa điền (ưu tiên giá trị trong Admin). */
-const DEFAULT_BANK_NAME = process.env.DEFAULT_BANK_NAME || ''
-const DEFAULT_BANK_ACCOUNT = process.env.DEFAULT_BANK_ACCOUNT || ''
-const DEFAULT_BANK_OWNER = process.env.DEFAULT_BANK_OWNER || ''
+// Ưu tiên: BANK_ID / BANK_ACCOUNT_NO / BANK_ACCOUNT_NAME → DEFAULT_BANK_* → ''
+const DEFAULT_BANK_NAME = process.env.BANK_ID || process.env.DEFAULT_BANK_NAME || ''
+const DEFAULT_BANK_ACCOUNT = process.env.BANK_ACCOUNT_NO || process.env.DEFAULT_BANK_ACCOUNT || ''
+const DEFAULT_BANK_OWNER = process.env.BANK_ACCOUNT_NAME || process.env.DEFAULT_BANK_OWNER || ''
 
 /** JWT secret — dùng cho ký và xác thực token thay Supabase */
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_SECRET || 'changeme-please-set-JWT_SECRET'
@@ -411,6 +412,77 @@ async function getPlansByIds(planIds, session = null) {
   return plans
 }
 
+async function fetchCatalogVariantPlans(session = null) {
+  await connectMongo()
+  const categories = normalizeDocs(
+    await collection('product_categories')
+      .find({ status: { $ne: 'inactive' } }, withSession({}, session))
+      .toArray()
+  )
+  if (!categories.length) return []
+
+  const categoryIds = categories.map(c => c.id)
+  const products = normalizeDocs(
+    await collection('products')
+      .find({ categoryId: { $in: categoryIds }, status: 'active' }, withSession({}, session))
+      .toArray()
+  )
+  if (!products.length) return []
+
+  const productIds = products.map(p => p.id)
+  const [variants, details] = await Promise.all([
+    collection('product_variants')
+      .find({ productId: { $in: productIds }, status: 'active' }, withSession({}, session))
+      .toArray(),
+    collection('product_details')
+      .find({ productId: { $in: productIds } }, withSession({}, session))
+      .toArray()
+  ])
+
+  const categoryMap = new Map(categories.map(c => [c.id, c]))
+  const productMap = new Map(products.map(p => [p.id, p]))
+  const detailMap = new Map(normalizeDocs(details).map(d => [d.productId, d]))
+
+  return normalizeDocs(variants)
+    .map((variant) => {
+      const product = productMap.get(variant.productId)
+      if (!product) return null
+      const category = categoryMap.get(product.categoryId)
+      const detail = detailMap.get(product.id)
+      const price = Number(variant.price || 0)
+      return {
+        id: variant.id || String(variant._id),
+        variant_id: variant.id || String(variant._id),
+        product_id: product.id || variant.productId || null,
+        category_id: product.categoryId || null,
+        category_type: category?.type || null,
+        name: `${product.name} - ${variant.name || variant.label || 'Variant'}`,
+        price,
+        base_price: price,
+        duration_days: resolveCatalogVariantDuration(product, variant),
+        service: detectService(`${category?.name || ''} ${product.name || ''}`),
+        fulfillment_type: resolveCatalogFulfillment(product, category),
+        description: detail?.shortDescription || product.description || null,
+        longDescription: detail?.longDescription || null,
+        instructions: detail?.longDescription || detail?.shortDescription || null,
+        active: true,
+        is_active: true,
+        sort_order: Number(category?.sortOrder ?? product.sortOrder ?? variant.sortOrder ?? 9999),
+        catalog_sort_order: {
+          category: Number(category?.sortOrder ?? 9999),
+          product: Number(product.sortOrder ?? 9999),
+          variant: Number(variant.sortOrder ?? 9999)
+        }
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const ac = a.catalog_sort_order || {}
+      const bc = b.catalog_sort_order || {}
+      return (ac.category - bc.category) || (ac.product - bc.product) || (ac.variant - bc.variant) || ((a.price || 0) - (b.price || 0))
+    })
+}
+
 async function getSubscriptionById(subId, session = null) {
   await connectMongo()
   const doc = await collection('subscriptions').findOne(legacyIdFilter(subId), withSession({}, session))
@@ -523,13 +595,14 @@ async function processConfirmedWalletTopup(transferContent, amount) {
     )
     if (profile?.email) {
       const site = cfg.site_name || 'Netflix Store'
-      await sendEmail(profile.email, `✅ Nạp ví thành công — ${site}`, `
+      // Fire-and-forget — không block flow xác nhận nạp ví
+      sendEmail(profile.email, `✅ Nạp ví thành công — ${site}`, `
         <div style="font-family:Inter,sans-serif;max-width:500px;margin:0 auto;padding:24px;">
           <h2 style="color:#4F46E5;">✅ Nạp ví thành công</h2>
           <p>Đã nạp <strong>${fmtVND(amount)}</strong> vào ví của bạn.</p>
           <p style="font-size:18px;">Số dư hiện tại: <strong style="color:#4F46E5;">${fmtVND(balanceAfter)}</strong></p>
           <p style="color:#666;font-size:13px;">Mã giao dịch: ${transferContent}</p>
-        </div>`)
+        </div>`).catch(e => console.warn('[WalletTopup] email failed:', e.message))
     }
     return { success: true, balance_after: balanceAfter }
   } catch (err) {
@@ -668,7 +741,14 @@ async function getSetting(key) {
   }
 }
 
+let _settingsCache = null
+let _settingsCacheAt = 0
+const SETTINGS_CACHE_TTL = 30000 // 30s
+
+function invalidateSettingsCache() { _settingsCache = null; _settingsCacheAt = 0 }
+
 async function getAllSettings() {
+  if (_settingsCache && Date.now() - _settingsCacheAt < SETTINGS_CACHE_TTL) return _settingsCache
   try {
     await connectMongo()
     const docs = await collection('settings')
@@ -681,16 +761,22 @@ async function getAllSettings() {
     if (cfg.telegram_chat_id === undefined) cfg.telegram_chat_id = process.env.TELEGRAM_CHAT_ID || ''
     if (cfg.mbbank_api_token === undefined) cfg.mbbank_api_token = process.env.MBBANK_API_TOKEN || ''
     if (cfg.mbbank_history_base === undefined) cfg.mbbank_history_base = process.env.MBBANK_HISTORY_BASE || 'https://thueapibank.vn/historyapimbbank'
-    if (cfg.bank_name === undefined) cfg.bank_name = process.env.DEFAULT_BANK_NAME || 'MB Bank'
-    if (cfg.bank_account === undefined) cfg.bank_account = process.env.DEFAULT_BANK_ACCOUNT || ''
-    if (cfg.bank_owner === undefined) cfg.bank_owner = process.env.DEFAULT_BANK_OWNER || ''
+    // Env override: BANK_ID/BANK_ACCOUNT_NO/BANK_ACCOUNT_NAME ưu tiên cao hơn MongoDB
+    if (process.env.BANK_ID) cfg.bank_name = process.env.BANK_ID
+    else if (cfg.bank_name === undefined) cfg.bank_name = process.env.DEFAULT_BANK_NAME || 'MB Bank'
+    if (process.env.BANK_ACCOUNT_NO) cfg.bank_account = process.env.BANK_ACCOUNT_NO
+    else if (cfg.bank_account === undefined) cfg.bank_account = process.env.DEFAULT_BANK_ACCOUNT || ''
+    if (process.env.BANK_ACCOUNT_NAME) cfg.bank_owner = process.env.BANK_ACCOUNT_NAME
+    else if (cfg.bank_owner === undefined) cfg.bank_owner = process.env.DEFAULT_BANK_OWNER || ''
     if (cfg.email_from === undefined) cfg.email_from = process.env.EMAIL_FROM || process.env.GMAIL_USER || ''
     if (cfg.site_name === undefined) cfg.site_name = 'Netflix Store'
     if (cfg.site_title === undefined) cfg.site_title = 'Netflix Store'
     if (cfg.vietqr_bank_bin === undefined) cfg.vietqr_bank_bin = '970422'
+    _settingsCache = cfg
+    _settingsCacheAt = Date.now()
     return cfg
   } catch {
-    return {}
+    return _settingsCache || {}
   }
 }
 
@@ -1094,7 +1180,8 @@ const ALLOWED_SETTING_KEYS = new Set([
   'footer_text',
   'notice_enabled', 'notice_title', 'notice_body', 'notice_cta_label', 'notice_cta_url',
   'catalog_config',
-  'guides_config'
+  'guides_config',
+  'show_netflix_credentials'
 ])
 
 /** Mặc định khi chưa cấu hình guides_config trong DB (chỉ dùng cho GET /api/guides) */
@@ -1151,6 +1238,7 @@ const GUIDES_PUBLIC_FALLBACK = {
 
 // ===================== HELPERS =====================
 function nodeRequest(url, options = {}) {
+  const timeoutMs = options.timeout || 20000
   return new Promise((resolve, reject) => {
     const u = new URL(url)
     const lib = u.protocol === 'https:' ? https : http
@@ -1199,6 +1287,9 @@ function nodeRequest(url, options = {}) {
           })
         }).catch(reject)
       })
+    })
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`nodeRequest timeout after ${timeoutMs}ms: ${url}`))
     })
     req.on('error', reject)
     if (isPost) req.write(bodyBuf)
@@ -1955,10 +2046,13 @@ async function fetchNetflixAccountPage(cookieStr) {
     const idx = cookie.indexOf('NetflixId=')
     if (idx > 0) cookie = cookie.substring(idx)
 
-    const result = await nodeRequest('https://www.netflix.com/account', {
-      method: 'GET',
-      headers: { ...NETFLIX_HEADERS, 'Cookie': cookie, 'Accept-Encoding': 'identity' },
-    })
+    const nfHeaders = { ...NETFLIX_HEADERS, 'Cookie': cookie, 'Accept-Encoding': 'identity' }
+    // Gọi 3 trang song song để giảm tổng thời gian chờ
+    const [result, membershipRes, browseRes] = await Promise.all([
+      nodeRequest('https://www.netflix.com/account',            { method: 'GET', headers: nfHeaders }),
+      nodeRequest('https://www.netflix.com/account/membership', { method: 'GET', headers: nfHeaders }).catch(() => null),
+      nodeRequest('https://www.netflix.com/browse',             { method: 'GET', headers: nfHeaders }).catch(() => null),
+    ])
 
     if (result.status === 301 || result.status === 302) {
       return { reachable: false, redirected: true, hasPlan: false }
@@ -1969,30 +2063,13 @@ async function fetchNetflixAccountPage(cookieStr) {
     if (!html || html.length < 3000) return { reachable: false, hasPlan: false }
 
     let membershipHtml = ''
-    try {
-      const membership = await nodeRequest('https://www.netflix.com/account/membership', {
-        method: 'GET',
-        headers: { ...NETFLIX_HEADERS, 'Cookie': cookie, 'Accept-Encoding': 'identity' },
-      })
-      if (membership.status === 200) membershipHtml = membership.text()
-    } catch (e) {
-      console.warn('[NF-ACCOUNT] membership fallback failed:', e.message)
-    }
+    if (membershipRes && membershipRes.status === 200) membershipHtml = membershipRes.text()
 
-    // Fetch /browse để detect popup "Your account is on hold. Retry your payment?"
-    // Popup này chỉ xuất hiện trên trang browse, không xuất hiện trên /account
+    // /browse để detect popup "Your account is on hold. Retry your payment?"
     let browseHtml = ''
-    try {
-      const browse = await nodeRequest('https://www.netflix.com/browse', {
-        method: 'GET',
-        headers: { ...NETFLIX_HEADERS, 'Cookie': cookie, 'Accept-Encoding': 'identity' },
-      })
-      if (browse.status === 200) {
-        browseHtml = browse.text()
-        console.log('[NF-ACCOUNT] browse_len=%d', browseHtml.length)
-      }
-    } catch (e) {
-      console.warn('[NF-ACCOUNT] browse fetch failed:', e.message)
+    if (browseRes && browseRes.status === 200) {
+      browseHtml = browseRes.text()
+      console.log('[NF-ACCOUNT] browse_len=%d', browseHtml.length)
     }
 
     // ── PLAN ─────────────────────────────────────────────────────────────────────
@@ -2288,59 +2365,88 @@ async function assignVerifiedAccount(subId) {
       .toArray()
   )
 
+  // Chiến lược A+B:
+  // - Acc được check trong vòng 10 phút → trust kho, bỏ qua re-check (fast path)
+  // - Acc cũ hơn → check song song tất cả candidates cùng lúc (parallel path)
+  const TRUST_CHECKED_MS = 10 * 60 * 1000
+  const now = Date.now()
+
+  const freshCandidates = []
+  const staleCandidates = []
   for (const res of candidates) {
-    const maxSlots = res.max_slots || 5
-    console.log(`[Auto-Pay] Checking ${res.id.substring(0, 8)} (${res.assigned_count || 0}/${maxSlots} slots)...`)
-    const details = await checkAccountDetails(res.value)
-    const hasActivePlan = details.alive && details.hasPremium
-
-    if (hasActivePlan) {
-      try {
-        const assigned = await withMongoTransaction(async (session) => {
-          const fresh = await getResourceById(res.id, session)
-          if (!fresh || fresh.status !== 'available') return false
-          const freshCount = Number(fresh.assigned_count || 0)
-          const freshMax = Number(fresh.max_slots || 5)
-          if (freshCount >= freshMax) return false
-
-          const newCount = freshCount + 1
-          const newStatus = newCount >= freshMax ? 'full' : 'available'
-          const upd = await collection('resources').updateOne(
-            { ...legacyIdFilter(res.id), status: 'available' },
-            {
-              $set: {
-                assigned_count: newCount,
-                status: newStatus,
-                assigned_to: subId
-              }
-            },
-            withSession({}, session)
-          )
-          if (!upd.modifiedCount) return false
-          await collection('subscriptions').updateOne(
-            legacyIdFilter(subId),
-            { $set: { login_link: fresh.value } },
-            withSession({}, session)
-          )
-          return { value: fresh.value, newCount, freshMax }
-        })
-
-        if (assigned) {
-          const freshMax = assigned.freshMax
-          const newCount = assigned.newCount
-          console.log(`[Auto-Pay] ✅ Assigned (${newCount}/${maxSlots} slots used)`)
-          return assigned.value
-        }
-      } catch (err) {
-        console.error('[Auto-Pay] assign verified account failed:', err.message)
-      }
+    const checkedAt = res.last_checked_at ? new Date(res.last_checked_at).getTime() : 0
+    if (now - checkedAt < TRUST_CHECKED_MS) {
+      freshCandidates.push(res)
     } else {
-      try {
-        const deadReason = details.alive ? 'no_plan' : 'dead'
-        await collection('resources').deleteOne(legacyIdFilter(res.id))
-        console.log(`[Auto-Pay] ❌ Account ${deadReason}, deleted...`)
-      } catch (err) {
-        console.error('[Auto-Pay] delete dead failed:', err.message)
+      staleCandidates.push(res)
+    }
+  }
+
+  const tryAssign = async (res, isVerified) => {
+    try {
+      return await withMongoTransaction(async (session) => {
+        const fresh = await getResourceById(res.id, session)
+        if (!fresh || fresh.status !== 'available') return false
+        const freshCount = Number(fresh.assigned_count || 0)
+        const freshMax = Number(fresh.max_slots || 5)
+        if (freshCount >= freshMax) return false
+        const newCount = freshCount + 1
+        const newStatus = newCount >= freshMax ? 'full' : 'available'
+        const upd = await collection('resources').updateOne(
+          { ...legacyIdFilter(res.id), status: 'available' },
+          { $set: { assigned_count: newCount, status: newStatus, assigned_to: subId } },
+          withSession({}, session)
+        )
+        if (!upd.modifiedCount) return false
+        await collection('subscriptions').updateOne(
+          legacyIdFilter(subId),
+          { $set: { login_link: fresh.value } },
+          withSession({}, session)
+        )
+        return { value: fresh.value, newCount, freshMax }
+      })
+    } catch (err) {
+      console.error('[Auto-Pay] assign failed:', err.message)
+      return false
+    }
+  }
+
+  // Fast path: acc mới check → giao thẳng theo thứ tự
+  for (const res of freshCandidates) {
+    const maxSlots = res.max_slots || 5
+    console.log(`[Auto-Pay] ⚡ Fast-assign ${res.id.substring(0, 8)} (checked <10m ago)`)
+    const assigned = await tryAssign(res, true)
+    if (assigned) {
+      console.log(`[Auto-Pay] ✅ Assigned fast (${assigned.newCount}/${maxSlots})`)
+      return assigned.value
+    }
+  }
+
+  // Parallel path: acc cũ hơn → check live song song, lấy candidate đầu tiên alive
+  if (staleCandidates.length > 0) {
+    console.log(`[Auto-Pay] Parallel-checking ${staleCandidates.length} stale candidates...`)
+    const checkResults = await Promise.all(
+      staleCandidates.map(async (res) => {
+        const details = await checkAccountDetails(res.value)
+        return { res, details }
+      })
+    )
+    // Xóa acc chết (non-blocking)
+    const deadOnes = checkResults.filter(({ details }) => !details.alive || !details.hasPremium)
+    for (const { res, details } of deadOnes) {
+      const deadReason = details.alive ? 'no_plan' : 'dead'
+      collection('resources').deleteOne(legacyIdFilter(res.id))
+        .catch(e => console.error('[Auto-Pay] delete dead failed:', e.message))
+      console.log(`[Auto-Pay] ❌ ${res.id.substring(0, 8)} ${deadReason}, deleting...`)
+    }
+    // Thử giao theo thứ tự acc alive
+    const aliveOnes = checkResults.filter(({ details }) => details.alive && details.hasPremium)
+    for (const { res } of aliveOnes) {
+      const maxSlots = res.max_slots || 5
+      const assigned = await tryAssign(res, true)
+      if (assigned) {
+        console.log(`[Auto-Pay] ✅ Assigned parallel (${assigned.newCount}/${maxSlots})`)
+        return assigned.value
       }
     }
   }
@@ -2395,8 +2501,14 @@ async function claimWarranty(subId, session = null) {
   try {
     const sub = await getSubscriptionById(subId, session)
     if (!sub) return { success: false, message: 'Subscription không tồn tại' }
+    if (sub.warranty_used) {
+      return { success: false, reason: 'already_used', message: 'Đơn đã được bảo hành trước đó.' }
+    }
+    if (sub.end_at && new Date(sub.end_at).getTime() <= Date.now()) {
+      return { success: false, reason: 'expired', message: 'Đơn đã hết hạn, không đủ điều kiện bảo hành.' }
+    }
     if (sub.status !== 'active') {
-      return { success: false, message: 'Subscription không ở trạng thái active' }
+      return { success: false, reason: 'expired', message: 'Đơn đã hết hạn, không đủ điều kiện bảo hành.' }
     }
 
     // Kiểm tra tài khoản hiện tại: nếu vẫn sống + có gói VÀ KHÔNG CÓ lỗi TT → từ chối bảo hành
@@ -2493,6 +2605,8 @@ async function claimWarranty(subId, session = null) {
       {
         $set: {
           login_link: resource.value,
+          warranty_used: true,
+          warranty_at: new Date(),
           updated_at: new Date()
         }
       },
@@ -2626,7 +2740,7 @@ async function processConfirmedPayment(transferContent, amount) {
  * Tìm payment pending khớp với giao dịch ngân hàng đến.
  * Kiểm tra nội dung CK ngân hàng có chứa transfer_content không và số tiền >= amount.
  */
-async function findPaymentMatchByIncoming(txContent, amountIn) {
+async function _findPaymentMatchByIncomingLegacy(txContent, amountIn) {
   try {
     await connectMongo()
     const content = String(txContent || '').trim().toLowerCase()
@@ -2665,7 +2779,7 @@ async function findPaymentMatchByIncoming(txContent, amountIn) {
 /**
  * Tìm wallet_topup pending khớp với giao dịch ngân hàng đến.
  */
-async function findWalletTopupByIncoming(txContent, amountIn) {
+async function _findWalletTopupByIncomingLegacy(txContent, amountIn) {
   try {
     await connectMongo()
     const content = String(txContent || '').trim().toLowerCase()
@@ -2697,7 +2811,7 @@ async function findWalletTopupByIncoming(txContent, amountIn) {
 /**
  * Xác nhận và ghi nhận nạp tiền vào ví của user.
  */
-async function processConfirmedWalletTopup(transferContent, actualAmount) {
+async function _processConfirmedWalletTopupLegacy(transferContent, actualAmount) {
   try {
     await connectMongo()
     const topup = normalizeDoc(
@@ -3188,6 +3302,22 @@ app.post('/api/get-link', async (req, res) => {
     const { cookie } = req.body
     if (!cookie) return res.status(400).json({ success: false, message: 'Missing cookie' })
 
+    const details = await checkAccountDetails(cookie)
+    if (!details.alive) {
+      return res.json({
+        success: false,
+        reason: 'cookie_dead',
+        message: 'Tài khoản bị mất phiên đăng nhập. Vui lòng bấm Bảo hành để được cấp lại.'
+      })
+    }
+    if (!details.hasPremium) {
+      return res.json({
+        success: false,
+        reason: 'plan_lost',
+        message: 'Gói dịch vụ không còn hiệu lực. Vui lòng bấm Bảo hành để kiểm tra.'
+      })
+    }
+
     const bodyStr = new URLSearchParams({
       raw_cookie: cookie.trim(),
       ajax: '1',
@@ -3208,14 +3338,14 @@ app.post('/api/get-link', async (req, res) => {
     })
 
     if (result.status !== 200) {
-      return res.json({ success: false, message: `nftoken.site returned ${result.status}` })
+      return res.json({ success: false, reason: 'system_error', message: `nftoken.site returned ${result.status}` })
     }
 
     let data
-    try { data = result.json() } catch { return res.json({ success: false, message: 'Invalid JSON from nftoken.site' }) }
+    try { data = result.json() } catch { return res.json({ success: false, reason: 'system_error', message: 'Invalid JSON from nftoken.site' }) }
 
     if (!data || data.status !== 'SUCCESS') {
-      return res.json({ success: false, message: 'Cookie die hoặc không hợp lệ', raw: data })
+      return res.json({ success: false, reason: 'system_error', message: 'Không thể lấy link lúc này.', raw: data })
     }
 
     let link = null
@@ -3226,6 +3356,9 @@ app.post('/api/get-link', async (req, res) => {
       const full = data.full_data_string || ''
       const m = full.match(/https?:\/\/netflix\.com\/\?nftoken=[^\s"]+/)
       if (m) link = m[0]
+    }
+    if (!link) {
+      return res.json({ success: false, reason: 'system_error', message: 'Không thể lấy link lúc này.', raw: data })
     }
 
     let acctInfo = null
@@ -3372,7 +3505,7 @@ app.post('/api/tv-init', async (req, res) => {
 
     res.json({ success: true, authUrl, paymentError, paymentFailed: paymentError })
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
+    res.status(500).json({ success: false, message: 'Lỗi kết nối tới Netflix, vui lòng thử lại' })
   }
 })
 
@@ -3418,13 +3551,16 @@ app.post('/api/tv-submit', async (req, res) => {
         return res.json({ success: true, message: '🎉 TV đã được đăng nhập thành công!' })
       }
       const errM = body.match(/data-uia=["']tv\+error["'][^>]*>([^<]+)/)
-      if (errM) return res.json({ success: false, message: errM[1].trim() })
+      if (errM) {
+        const errText = errM[1].trim().replace(/<[^>]*>/g, '').substring(0, 200)
+        return res.json({ success: false, message: errText || 'Netflix từ chối mã này' })
+      }
       return res.json({ success: false, message: 'Netflix không chấp nhận mã này (có thể sai mã hoặc cookie hết hạn)' })
     }
 
-    res.json({ success: false, message: `HTTP ${result.status} — ${location || 'Không có redirect'}` })
+    res.json({ success: false, message: `HTTP ${result.status} — Netflix không phản hồi đúng định dạng` })
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
+    res.status(500).json({ success: false, message: 'Lỗi kết nối tới Netflix, vui lòng thử lại' })
   }
 })
 
@@ -3560,9 +3696,12 @@ app.get('/api/wallet/topup-status/:transferContent', requireUser, async (req, re
     if (!topup) return res.json({ confirmed: false, status: 'not_found' })
 
     if (topup.status === 'pending') {
-      await checkMbbankTransactions().catch(err => {
+      // Chạy bank check song song với trả kết quả ngay — không chặn response
+      const recheckPromise = checkMbbankTransactions().catch(err => {
         console.warn('[WalletTopupStatus] bank check failed:', err.message)
       })
+      // Chờ tối đa 4s để có kết quả nhanh; nếu bank API chậm → trả pending rồi FE poll tiếp
+      await Promise.race([recheckPromise, new Promise(r => setTimeout(r, 4000))])
       topup = normalizeDoc(
         await collection('wallet_topups').findOne(filter, { sort: { created_at: -1 } })
       )
@@ -4098,7 +4237,7 @@ app.patch('/api/admin/settings', requireAdmin, async (req, res) => {
           upsert: true
         }
       }))
-    if (ops.length) await collection('settings').bulkWrite(ops)
+    if (ops.length) { await collection('settings').bulkWrite(ops); invalidateSettingsCache() }
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ message: err.message || 'Lỗi lưu cài đặt' })
@@ -4219,7 +4358,14 @@ function pickPublicStoreFields(row) {
 
 async function fetchMergedPlansForStoreMongo(storeId) {
   await connectMongo()
-  const plans = normalizeDocs(await collection('plans').find({ is_active: { $ne: false } }).sort({ sort_order: 1, price: 1 }).toArray())
+  const [legacyPlans, catalogPlans] = await Promise.all([
+    collection('plans').find({ is_active: { $ne: false } }).sort({ sort_order: 1, price: 1 }).toArray(),
+    fetchCatalogVariantPlans()
+  ])
+  const plans = [
+    ...normalizeDocs(legacyPlans).map(p => ({ ...p, base_price: p.base_price ?? p.price })),
+    ...catalogPlans
+  ]
   if (!storeId) return plans
   const prices = normalizeDocs(await collection('seller_store_plan_prices').find({ seller_store_id: storeId }).toArray())
   const priceMap = new Map(prices.map(p => [p.plan_id, p.price]))
@@ -4644,7 +4790,8 @@ app.get('/api/settings', async (req, res) => {
       'contact_telegram','contact_zalo',
       'social_facebook','social_youtube','social_tiktok','footer_text',
       'notice_enabled','notice_title','notice_body','notice_cta_label','notice_cta_url',
-      'catalog_config']
+      'catalog_config',
+      'show_netflix_credentials']
     const pub = {}
     for (const k of PUBLIC_KEYS) if (cfg[k] != null) pub[k] = cfg[k]
     res.json({ settings: pub })
@@ -4927,6 +5074,14 @@ app.post('/api/admin/accounts/:id/check-plan', requireAdmin, async (req, res) =>
       await collection('resources').deleteOne(legacyIdFilter(resource.id))
     }
 
+    // Cập nhật last_checked_at để fast-path fulfillment trust được kết quả
+    if (!paymentError && !effectivelyDead) {
+      collection('resources').updateOne(
+        legacyIdFilter(resource.id),
+        { $set: { last_checked_at: new Date() } }
+      ).catch(() => {})
+    }
+
     // Nếu admin muốn auto-mark dead
     if (!paymentError && effectivelyDead && req.body?.markDead) {
       await collection('resources').updateOne(
@@ -5000,7 +5155,11 @@ app.post('/api/admin/accounts', requireAdmin, async (req, res) => {
     let billingText = null, planName = null, planEmail = null
     let accountNote = note || null
     if (svc === 'netflix') {
-      const details = await checkAccountDetails(value.trim())
+      // Chạy song song để tiết kiệm thời gian (~2x nhanh hơn tuần tự)
+      const [details, acctPage] = await Promise.all([
+        checkAccountDetails(value.trim()),
+        fetchNetflixAccountPage(value.trim()).catch(() => ({ reachable: false }))
+      ])
       if (!details.alive) return res.status(422).json({ error: 'Cookie đã chết hoặc không hợp lệ — không thêm vào kho', code: 'dead' })
       if (!details.hasPremium) return res.status(422).json({
         error: `Cookie sống nhưng không có gói Premium (gói hiện tại: ${details.plan || 'không xác định'}) — không thêm vào kho`,
@@ -5009,15 +5168,11 @@ app.post('/api/admin/accounts', requireAdmin, async (req, res) => {
       planName  = details.plan || null
       planEmail = details.email || null
       let netflixPaymentError = !!(details.paymentError || details.paymentFailed)
-      // Lấy ngày hết hạn từ trang membership
-      try {
-        const acctPage = await fetchNetflixAccountPage(value.trim())
-        if (acctPage.reachable) {
-          billingText = acctPage.billingText || null
-          if (acctPage.plan) planName = acctPage.plan
-          if (hasNetflixPaymentErrorFlag(acctPage)) netflixPaymentError = true
-        }
-      } catch { /* billing_text không bắt buộc */ }
+      if (acctPage.reachable) {
+        billingText = acctPage.billingText || null
+        if (acctPage.plan) planName = acctPage.plan
+        if (hasNetflixPaymentErrorFlag(acctPage)) netflixPaymentError = true
+      }
       if (netflixPaymentError) return res.status(422).json({
         error: `Cookie co loi thanh toan (goi hien tai: ${planName || 'khong xac dinh'}) - khong them vao kho`,
         code: 'payment_error', plan: planName, email: planEmail
@@ -5053,46 +5208,49 @@ app.post('/api/admin/accounts/bulk', requireAdmin, async (req, res) => {
     let added = 0, duplicates = 0, errors = 0, dead = 0, no_plan = 0, payment_error = 0
     const insertedDocs = []
     const affectedVariantIds = new Set()
-    for (const a of accounts) {
+
+    // Xử lý song song tối đa 5 tài khoản cùng lúc để tránh 504
+    const CONCURRENCY = 5
+    const processOne = async (a) => {
       const val = (a.value || '').trim()
-      if (!val) { errors++; continue }
+      if (!val) { errors++; return }
       let svc = a.service || 'netflix'
       const normalizedAccountType = a.account_type || 'shared'
-      if (normalizedAccountType === 'stock' && isQuantityPlaceholderValue(val)) { errors++; continue }
+      if (normalizedAccountType === 'stock' && isQuantityPlaceholderValue(val)) { errors++; return }
       const exists = await collection('resources').findOne({ value: val })
-      if (exists) { duplicates++; continue }
+      if (exists) { duplicates++; return }
       let stockPlan = null
-      if (svc === 'netflix' && normalizedAccountType === 'stock') { errors++; continue }
-      if (svc !== 'netflix' && normalizedAccountType !== 'stock') { errors++; continue }
+      if (svc === 'netflix' && normalizedAccountType === 'stock') { errors++; return }
+      if (svc !== 'netflix' && normalizedAccountType !== 'stock') { errors++; return }
       if (normalizedAccountType === 'stock' && svc !== 'netflix') {
-        if (!a.plan_id) { errors++; continue }
+        if (!a.plan_id) { errors++; return }
         stockPlan = await getPlanById(a.plan_id)
         if (!stockPlan || !(stockPlan.variant_id || stockPlan.product_id) || (stockPlan.service || 'netflix') === 'netflix' || !isAutoFulfillment(stockPlan.fulfillment_type)) {
-          errors++; continue
+          errors++; return
         }
         svc = stockPlan.service || svc || 'other'
       }
-      // Kiểm tra live + có gói (chỉ với Netflix)
       let billingText = null, planName = null, planEmail = null
-      let accountNote = a.note || null
+      const accountNote = a.note || null
       if (svc === 'netflix') {
-        let details
-        try { details = await checkAccountDetails(val) } catch { errors++; continue }
-        if (!details.alive) { dead++; continue }
-        if (!details.hasPremium) { no_plan++; continue }
+        let details, acctPage
+        try {
+          ;[details, acctPage] = await Promise.all([
+            checkAccountDetails(val),
+            fetchNetflixAccountPage(val).catch(() => ({ reachable: false }))
+          ])
+        } catch { errors++; return }
+        if (!details.alive) { dead++; return }
+        if (!details.hasPremium) { no_plan++; return }
         planName  = details.plan || null
         planEmail = details.email || null
         let netflixPaymentError = !!(details.paymentError || details.paymentFailed)
-        // Lấy ngày hết hạn (không bắt buộc, bỏ qua nếu lỗi)
-        try {
-          const acctPage = await fetchNetflixAccountPage(val)
-          if (acctPage.reachable) {
-            billingText = acctPage.billingText || null
-            if (acctPage.plan) planName = acctPage.plan
-            if (hasNetflixPaymentErrorFlag(acctPage)) netflixPaymentError = true
-          }
-        } catch { /* ignore */ }
-        if (netflixPaymentError) { payment_error++; continue }
+        if (acctPage.reachable) {
+          billingText = acctPage.billingText || null
+          if (acctPage.plan) planName = acctPage.plan
+          if (hasNetflixPaymentErrorFlag(acctPage)) netflixPaymentError = true
+        }
+        if (netflixPaymentError) { payment_error++; return }
       }
       try {
         const id = createId()
@@ -5117,6 +5275,12 @@ app.post('/api/admin/accounts/bulk', requireAdmin, async (req, res) => {
         added++
       } catch { errors++ }
     }
+
+    // Chạy theo batch CONCURRENCY để không quá tải server Netflix
+    for (let i = 0; i < accounts.length; i += CONCURRENCY) {
+      await Promise.all(accounts.slice(i, i + CONCURRENCY).map(processOne))
+    }
+
     await Promise.all([...affectedVariantIds].map(id => syncProductVariantStockQuiet(id)))
     res.status(201).json({ added, duplicates, errors, dead, no_plan, payment_error, accounts: insertedDocs })
   } catch (err) { res.status(500).json({ error: err.message }) }
@@ -5192,7 +5356,7 @@ app.post('/api/claim-warranty', requireUser, async (req, res) => {
     if (String(sub.user_id) !== String(req.authUserId)) return res.status(403).json({ error: 'Không phải đơn của bạn' })
     const planMeta = await getPlanMeta(sub.plan)
     if ((planMeta.service || 'netflix') !== 'netflix') {
-      return res.status(400).json({ error: 'Bảo hành chỉ áp dụng cho gói Netflix' })
+      return res.status(400).json({ reason: 'out_of_scope', error: 'Lỗi không thuộc phạm vi bảo hành, vui lòng liên hệ hỗ trợ.' })
     }
     const result = await claimWarranty(subscriptionId)
     res.json(result)

@@ -60,6 +60,13 @@ export const SETTINGS_GROUPS = [
       ['notice_cta_url', 'Link hành động', '#/plans'],
     ],
   },
+  {
+    id: 'netflix',
+    title: 'Netflix – Hiển thị tài khoản',
+    keys: [
+      ['show_netflix_credentials', 'Cho khách xem Cookie / Email / Mật khẩu', '', 'checkbox'],
+    ],
+  },
 ]
 
 const SETTINGS_META = {
@@ -82,6 +89,10 @@ const SETTINGS_META = {
   notice: {
     icon: 'POP',
     desc: 'Popup thông báo khi khách truy cập website.',
+  },
+  netflix: {
+    icon: 'NF',
+    desc: 'Kiểm soát thông tin tài khoản Netflix hiển thị cho khách hàng.',
   },
 }
 
