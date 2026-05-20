@@ -106,12 +106,18 @@ async function connectMongo() {
     throw new Error('Missing MONGODB_URI in .env')
   }
   // Best practices: connection pool + timeout + Stable API (theo Atlas recommendation)
+  const isLocalMongo = uri.startsWith('mongodb://127.0.0.1') || uri.startsWith('mongodb://localhost')
   mongoClient = new MongoClient(uri, {
-    serverApi: {
-      version: ServerApiVersion.v1,
-      strict: true,
-      deprecationErrors: true,
-    },
+    ...(!isLocalMongo && {
+      serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+      },
+      tls: true,
+      tlsAllowInvalidCertificates: true,
+      tlsAllowInvalidHostnames: true,
+    }),
     maxPoolSize: 10,
     minPoolSize: 2,
     serverSelectionTimeoutMS: 10000,
@@ -119,9 +125,6 @@ async function connectMongo() {
     connectTimeoutMS: 10000,
     retryWrites: true,
     retryReads: true,
-    tls: true,
-    tlsAllowInvalidCertificates: true,
-    tlsAllowInvalidHostnames: true,
   })
   await mongoClient.connect()
   db = mongoClient.db(process.env.MONGODB_DB || 'netcredit')
