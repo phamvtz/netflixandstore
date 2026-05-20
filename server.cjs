@@ -8,29 +8,7 @@ try {
   dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1'])
 } catch { /* optional on older Node */ }
 
-// Fix Node.js 22+/24 + OpenSSL 3: Atlas gửi SSL alert 80 (internal_error)
-// Patch tls.createSecureContext — được gọi nội bộ bởi tls.connect và TLSSocket
-// Object.assign đảm bảo maxVersion: 'TLSv1.2' LUÔN thắng mọi option khác
-;(function patchTlsForAtlas() {
-  try {
-    const tls = require('tls')
-    tls.DEFAULT_MAX_VERSION = 'TLSv1.2'
-    tls.DEFAULT_MIN_VERSION = 'TLSv1.2'
-
-    const _csc = tls.createSecureContext
-    tls.createSecureContext = function (opts) {
-      return _csc.call(tls, Object.assign({}, opts, { maxVersion: 'TLSv1.2' }))
-    }
-
-    const _connect = tls.connect
-    tls.connect = function (options, ...rest) {
-      if (options && typeof options === 'object') {
-        options = Object.assign({}, options, { maxVersion: 'TLSv1.2' })
-      }
-      return _connect.call(tls, options, ...rest)
-    }
-  } catch (_) {}
-})()
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
 require('dotenv').config({ path: path.join(__dirname, '.env') })
 
