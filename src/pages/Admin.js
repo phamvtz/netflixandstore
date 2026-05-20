@@ -1020,7 +1020,13 @@ function renderDvOrdersV2() {
   const all = state.data.subscriptions
     .filter(r => {
       const planInfo = r.plans || state.maps.plans.get(r.plan)
-      return planInfo && (planInfo.service || 'netflix') !== 'netflix' && !['stock', 'key'].includes(planInfo.fulfillment_type)
+      if (!planInfo) return false
+      const svc = planInfo.service || 'netflix'
+      const ft = planInfo.fulfillment_type || 'netflix'
+      // Netflix riêng (manual) + tất cả dịch vụ non-Netflix không phải stock/key
+      const isManualNetflix = svc === 'netflix' && ft === 'manual'
+      const isNonNetflixService = svc !== 'netflix' && !['stock', 'key'].includes(ft)
+      return isManualNetflix || isNonNetflixService
     })
     .map(r => {
       const planInfo = r.plans || state.maps.plans.get(r.plan) || {}

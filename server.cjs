@@ -2626,8 +2626,8 @@ async function processConfirmedPayment(transferContent, amount) {
 
   let loginLink = null
 
-  if (isNetflix) {
-    // ── Netflix: assign from verified account pool ──
+  if (isNetflix && !isManual) {
+    // ── Netflix chung: assign from verified account pool ──
     loginLink = await assignVerifiedAccount(outcome.subscription_id)
     if (!loginLink) {
       console.warn(`[Auto-Pay] ⚠️ No alive account for sub ${outcome.subscription_id}`)
@@ -4934,6 +4934,56 @@ app.patch('/api/admin/subscriptions/:id', requireAdmin, async (req, res) => {
     ))
     if (!updated) return res.status(404).json({ error: 'Không tìm thấy đơn' })
     res.json({ subscription: updated })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Admin: lấy danh sách đơn đang chờ giao thủ công ──
+app.get('/api/admin/pending-fulfillment', requireAdmin, async (req, res) => {
+  try {
+    await connectMongo()
+    const subs = normalizeDocs(await collection('subscriptions').find({ status: 'processing' }).sort({ created_at: -1 }).toArray())
+    const userIds = [...new Set(subs.map(s => s.user_id).filter(Boolean))]
+    const planIds = [...new Set(subs.map(s => s.plan).filter(Boolean))]
+    const [profiles, plans] = await Promise.all([
+      userIds.length ? normalizeDocs(await collection('profiles').find({ id: { $in: userIds } }).toArray()) : [],
+      getPlansByIds(planIds)
+    ])
+    const profileMap = new Map(profiles.map(p => [p.id, p]))
+    const planMap = new Map(plans.map(p => [p.id, p]))
+    const result = subs.map(s => ({
+      ...s,
+      plan_name: planMap.get(s.plan)?.name || s.plan,
+      user_email: profileMap.get(s.user_id)?.email || s.user_id
+    }))
+    res.json({ subscriptions: result })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Admin: giao đơn thủ công (Netflix riêng) ──
+app.post('/api/admin/fulfill-subscription', requireAdmin, async (req, res) => {
+  try {
+    await connectMongo()
+    const { subscription_id, login_link } = req.body
+    if (!subscription_id || !login_link) return res.status(400).json({ error: 'Thiếu subscription_id hoặc login_link' })
+
+    const sub = normalizeDoc(await collection('subscriptions').findOne(legacyIdFilter(subscription_id)))
+    if (!sub) return res.status(404).json({ error: 'Không tìm thấy đơn' })
+
+    const plan = await getPlanById(sub.plan)
+    const days = plan?.duration_days || 30
+    const now = new Date()
+    const end = new Date(now.getTime() + days * 86400000)
+
+    await collection('subscriptions').updateOne(
+      legacyIdFilter(subscription_id),
+      { $set: { status: 'active', login_link, start_at: now.toISOString(), end_at: end.toISOString(), updated_at: now } }
+    )
+
+    const cfg = normalizeDoc(await collection('settings').findOne({}))
+    await sendActivationEmail(subscription_id, login_link, plan?.name || 'Netflix Riêng', days, cfg).catch(() => {})
+
+    sendTelegram(`✅ Admin đã giao đơn thủ công\n📦 Gói: ${plan?.name || sub.plan}\n👤 User: ${sub.user_id}`)
+    res.json({ ok: true })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
