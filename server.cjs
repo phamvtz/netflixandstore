@@ -134,13 +134,16 @@ async function connectMongo() {
       strict: true,
       deprecationErrors: true,
     },
-    maxPoolSize: 10,                  // Tối đa 10 kết nối đồng thời
-    minPoolSize: 2,                   // Giữ ít nhất 2 kết nối sẵn
-    serverSelectionTimeoutMS: 10000,  // 10s chờ chọn server
-    socketTimeoutMS: 45000,           // 45s socket timeout
-    connectTimeoutMS: 10000,          // 10s kết nối ban đầu
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    connectTimeoutMS: 10000,
     retryWrites: true,
-    retryReads: true
+    retryReads: true,
+    tls: true,
+    tlsAllowInvalidCertificates: true,
+    tlsAllowInvalidHostnames: true,
   })
   await mongoClient.connect()
   db = mongoClient.db(process.env.MONGODB_DB || 'netcredit')
