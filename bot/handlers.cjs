@@ -3,12 +3,13 @@
 const {
   col, getOrCreateBotUser, getNetflixPlans, getPlanById,
   getBankSettings, createBotPayment, checkPaymentStatus,
-  getUserSubscriptions, cancelPayment,
+  getUserSubscriptions, cancelPayment, callServerAPI, getUserActiveSubs,
 } = require('./db.cjs')
 
 const {
   STATUS_BADGE, fmtDate, fmtMoney,
   mainMenuKeyboard, planListKeyboard, planDetailKeyboard, paymentKeyboard,
+  activeSubsKeyboard, warrantyActionKeyboard,
 } = require('./keyboards.cjs')
 
 const POLL_INTERVAL_MS = 15000
@@ -176,6 +177,64 @@ async function sendMyOrders(bot, chatId, tgUserId) {
   }
 }
 
+// ── Warranty handlers ──
+async function sendWarrantyMenu(bot, chatId, tgUserId) {
+  try {
+    const profile = await col('profiles').findOne({ tg_user_id: String(tgUserId) })
+    if (!profile) {
+      return bot.sendMessage(chatId, '📭 Bạn chưa có đơn active nào.', { reply_markup: mainMenuKeyboard() })
+    }
+    const subs = await getUserActiveSubs(profile.id)
+    if (!subs.length) {
+      return bot.sendMessage(chatId,
+        '📭 Bạn không có đơn nào còn hạn.',
+        { reply_markup: mainMenuKeyboard() }
+      )
+    }
+    await bot.sendMessage(chatId,
+      '🔧 <b>Bảo hành / Báo lỗi</b>\n\nChọn đơn cần xử lý:',
+      { parse_mode: 'HTML', reply_markup: activeSubsKeyboard(subs) }
+    )
+  } catch (err) {
+    console.error('[sendWarrantyMenu]', err.message)
+    await bot.sendMessage(chatId, '❌ Có lỗi xảy ra.')
+  }
+}
+
+async function handleClaimWarranty(bot, chatId, subId, userId) {
+  await bot.sendMessage(chatId, '⏳ Đang kiểm tra tài khoản...')
+  try {
+    const data = await callServerAPI('POST', '/api/claim-warranty', { subscription_id: subId }, userId)
+    if (data.login_link) {
+      await bot.sendMessage(chatId,
+        `✅ <b>Đã đổi tài khoản mới!</b>\n\n🔑 <code>${data.login_link}</code>\n\nGõ /myorders để xem chi tiết.`,
+        { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+      )
+    } else {
+      await bot.sendMessage(chatId,
+        `ℹ️ ${data.message || 'Tài khoản vẫn hoạt động tốt, không cần đổi.'}`,
+        { reply_markup: mainMenuKeyboard() }
+      )
+    }
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Lỗi không xác định'
+    await bot.sendMessage(chatId, `❌ ${msg}`, { reply_markup: mainMenuKeyboard() })
+  }
+}
+
+async function handleReportIssue(bot, chatId, subId, userId) {
+  try {
+    await callServerAPI('POST', '/api/report-cannot-view', { subscription_id: subId }, userId)
+    await bot.sendMessage(chatId,
+      `✅ <b>Đã gửi báo cáo!</b>\n\nAdmin sẽ kiểm tra và phản hồi trong vòng 24h.\nGõ /start để quay lại menu.`,
+      { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+    )
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Lỗi không xác định'
+    await bot.sendMessage(chatId, `❌ ${msg}`, { reply_markup: mainMenuKeyboard() })
+  }
+}
+
 // ── Register all bot event listeners ──
 function registerHandlers(bot) {
   bot.onText(/\/start/, async (msg) => {
@@ -197,6 +256,32 @@ function registerHandlers(bot) {
     if (data === 'cb_home') return sendMain(bot, chatId)
     if (data === 'cb_plans') { clearState(chatId); return sendPlans(bot, chatId) }
     if (data === 'cb_status') return sendMyOrders(bot, chatId, query.from.id)
+    if (data === 'cb_warranty_menu') return sendWarrantyMenu(bot, chatId, query.from.id)
+
+    if (data.startsWith('cb_wh_sub_')) {
+      const subId = data.slice('cb_wh_sub_'.length)
+      const sub = await col('subscriptions').findOne({ id: subId })
+      const plan = sub ? await col('plans').findOne({ id: sub.plan }) : null
+      const days = sub?.end_at ? Math.ceil((new Date(sub.end_at) - Date.now()) / 86400000) : 0
+      return bot.sendMessage(chatId,
+        `📦 <b>${plan?.name || subId}</b>\n📅 Còn <b>${days} ngày</b>\n\nChọn thao tác:`,
+        { parse_mode: 'HTML', reply_markup: warrantyActionKeyboard(subId) }
+      )
+    }
+
+    if (data.startsWith('cb_warranty_')) {
+      const subId = data.slice('cb_warranty_'.length)
+      const profile = await col('profiles').findOne({ tg_user_id: String(query.from.id) })
+      if (!profile) return bot.sendMessage(chatId, '❌ Không tìm thấy tài khoản.')
+      return handleClaimWarranty(bot, chatId, subId, profile.id)
+    }
+
+    if (data.startsWith('cb_report_')) {
+      const subId = data.slice('cb_report_'.length)
+      const profile = await col('profiles').findOne({ tg_user_id: String(query.from.id) })
+      if (!profile) return bot.sendMessage(chatId, '❌ Không tìm thấy tài khoản.')
+      return handleReportIssue(bot, chatId, subId, profile.id)
+    }
 
     if (data === 'cb_support') {
       const bank = await getBankSettings()

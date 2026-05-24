@@ -1,6 +1,8 @@
 'use strict'
 
 const crypto = require('crypto')
+const jwt = require('jsonwebtoken')
+const axios = require('axios')
 const { MongoClient } = require('mongodb')
 
 const MONGODB_URI = process.env.MONGODB_URI || ''
@@ -140,9 +142,39 @@ async function cancelPayment(transferContent) {
   )
 }
 
+// ── JWT + internal API ──
+function getBotUserJWT(userId) {
+  const secret = process.env.JWT_SECRET || 'changeme'
+  return jwt.sign({ id: userId, role: 'user' }, secret, { expiresIn: '1h' })
+}
+
+async function callServerAPI(method, path, body, userId) {
+  const token = getBotUserJWT(userId)
+  const port = process.env.PORT || 3002
+  const res = await axios({
+    method, url: `http://127.0.0.1:${port}${path}`,
+    headers: { Authorization: `Bearer ${token}` },
+    data: body, timeout: 20000,
+  })
+  return res.data
+}
+
+async function getUserActiveSubs(userId) {
+  const now = new Date()
+  const subs = await col('subscriptions')
+    .find({ user_id: userId, status: 'active', end_at: { $gt: now } })
+    .sort({ end_at: 1 }).toArray()
+  const planIds = [...new Set(subs.map(s => s.plan).filter(Boolean))]
+  const plans = planIds.length
+    ? await col('plans').find({ id: { $in: planIds } }).toArray() : []
+  const planMap = new Map(plans.map(p => [p.id, p]))
+  return subs.map(s => ({ ...s, plan_name: planMap.get(s.plan)?.name || s.plan }))
+}
+
 module.exports = {
   connectMongo, col,
   getOrCreateBotUser, getNetflixPlans, getPlanById,
   getBankSettings, createBotPayment, checkPaymentStatus,
   getUserSubscriptions, cancelPayment,
+  getBotUserJWT, callServerAPI, getUserActiveSubs,
 }
