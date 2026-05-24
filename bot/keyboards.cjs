@@ -42,20 +42,27 @@ function warrantyActionKeyboard(subId) {
   }
 }
 
+function planIcon(days) {
+  if (days <= 1) return '⚡'
+  if (days <= 30) return '🌟'
+  if (days <= 180) return '💫'
+  return '🏆'
+}
+
 function planListKeyboard(plans) {
   const rows = plans.map(p => ([{
-    text: `${p.name}  —  ${fmtMoney(p.price)}`,
+    text: `${planIcon(p.duration_days)} ${p.name}  ·  ${fmtMoney(p.price)}`,
     callback_data: `cb_plan_${p.id}`,
   }]))
-  rows.push([{ text: '🔙 Quay lại', callback_data: 'cb_home' }])
+  rows.push([{ text: '🏠 Menu chính', callback_data: 'cb_home' }])
   return { inline_keyboard: rows }
 }
 
 function planDetailKeyboard(planId) {
   return {
     inline_keyboard: [
-      [{ text: '🛒 Mua ngay', callback_data: `cb_buy_${planId}` }],
-      [{ text: '🔙 Danh sách gói', callback_data: 'cb_plans' }],
+      [{ text: '🛒 Mua ngay — Thanh toán ngay', callback_data: `cb_buy_${planId}` }],
+      [{ text: '◀️ Xem gói khác', callback_data: 'cb_plans' }],
     ],
   }
 }
@@ -63,8 +70,8 @@ function planDetailKeyboard(planId) {
 function paymentKeyboard(transferContent) {
   return {
     inline_keyboard: [
-      [{ text: '✅ Kiểm tra thanh toán', callback_data: `cb_check_${transferContent}` }],
-      [{ text: '❌ Huỷ đơn', callback_data: `cb_cancel_${transferContent}` }],
+      [{ text: '🔄 Kiểm tra thanh toán', callback_data: `cb_check_${transferContent}` }],
+      [{ text: '✖️ Huỷ đơn', callback_data: `cb_cancel_${transferContent}` }],
     ],
   }
 }

@@ -41,19 +41,27 @@ function startPoller(bot, chatId, transferContent) {
 
       if (result.loginLink) {
         await bot.sendMessage(chatId,
-          `✅ <b>Thanh toán thành công!</b>\n\n` +
-          `📦 Gói: <b>${plan?.name || result.planId}</b>\n` +
-          `🔑 Thông tin đăng nhập:\n<code>${result.loginLink}</code>\n` +
-          `📅 Hết hạn: <b>${fmtDate(result.endAt)}</b>\n\n` +
-          `Gõ /myorders để xem lại.`,
-          { parse_mode: 'HTML' }
+          [
+            `🎉 <b>THANH TOÁN THÀNH CÔNG!</b>`,
+            DIV,
+            `📦 Gói: <b>${plan?.name || result.planId}</b>`,
+            `📅 Hết hạn: <b>${fmtDate(result.endAt)}</b>`,
+            DIV,
+            `🔑 <b>Thông tin đăng nhập:</b>`,
+            `<code>${result.loginLink}</code>`,
+            DIV,
+            `<i>Nhấn vào thông tin để copy. Lưu lại cẩn thận!</i>`,
+          ].join('\n'),
+          { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
         )
       } else {
         await bot.sendMessage(chatId,
-          `✅ <b>Đã nhận thanh toán!</b>\n` +
-          `📦 Gói: <b>${plan?.name || ''}</b>\n\n` +
-          `Tài khoản đang được kích hoạt, thông báo ngay khi xong.\n` +
-          `Gõ /myorders để theo dõi.`,
+          [
+            `✅ <b>ĐÃ NHẬN THANH TOÁN</b>`,
+            DIV,
+            `Tài khoản đang được kích hoạt.`,
+            `Bạn sẽ nhận thông báo ngay khi xong.`,
+          ].join('\n'),
           { parse_mode: 'HTML' }
         )
       }
@@ -76,39 +84,58 @@ function startPoller(bot, chatId, transferContent) {
 }
 
 // ── Handlers ──
-async function sendMain(bot, chatId) {
-  await bot.sendMessage(chatId,
-    '🎬 <b>Netflix Store</b>\n\nChào mừng! Chọn thao tác:',
-    { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
-  )
+const DIV = '─────────────────────'
+
+function planIcon(days) {
+  if (days <= 1) return '⚡'
+  if (days <= 30) return '🌟'
+  if (days <= 180) return '💫'
+  return '🏆'
+}
+
+async function sendMain(bot, chatId, firstName) {
+  const greeting = firstName ? `Chào <b>${firstName}</b>! 👋` : 'Chào mừng! 👋'
+  const text = [
+    `🎬 <b>NETFLIX STORE</b>`,
+    DIV,
+    greeting,
+    ``,
+    `⚡ Giao tài khoản <b>tự động 24/7</b>`,
+    `🛡️ Bảo hành đổi acc miễn phí`,
+    `💳 Thanh toán qua MB Bank`,
+    DIV,
+  ].join('\n')
+  await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() })
 }
 
 async function sendPlans(bot, chatId) {
   const plans = await getNetflixPlans()
   if (!plans.length) return bot.sendMessage(chatId, '⚠️ Hiện chưa có gói nào. Thử lại sau.')
-  await bot.sendMessage(chatId, '📋 <b>Chọn gói Netflix:</b>', {
-    parse_mode: 'HTML',
-    reply_markup: planListKeyboard(plans),
-  })
+  const text = [
+    `📋 <b>CHỌN GÓI NETFLIX</b>`,
+    DIV,
+    `Chọn gói phù hợp với nhu cầu của bạn:`,
+  ].join('\n')
+  await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: planListKeyboard(plans) })
 }
 
 async function sendPlanDetail(bot, chatId, planId) {
   const plan = await getPlanById(planId)
   if (!plan) return bot.sendMessage(chatId, '❌ Gói không tồn tại.')
 
-  const features = (plan.features || []).map(f => `• ${f}`).join('\n')
+  const features = (plan.features || []).map(f => `  ✔️ ${f}`).join('\n')
+  const icon = planIcon(plan.duration_days)
   const text = [
-    `🎬 <b>${plan.name}</b>`,
+    `${icon} <b>${plan.name.toUpperCase()}</b>`,
+    DIV,
     `💰 Giá: <b>${fmtMoney(plan.price)}</b>`,
-    `⏱ Thời hạn: <b>${plan.duration_days} ngày</b>`,
-    `⚡ <i>Giao tự động ngay sau thanh toán</i>`,
-    features ? `\n📌 Tính năng:\n${features}` : '',
+    `📅 Thời hạn: <b>${plan.duration_days} ngày</b>`,
+    `⚡ Giao tự động ngay sau thanh toán`,
+    features ? `${DIV}\n📌 <b>Bao gồm:</b>\n${features}` : '',
+    DIV,
   ].filter(Boolean).join('\n')
 
-  await bot.sendMessage(chatId, text, {
-    parse_mode: 'HTML',
-    reply_markup: planDetailKeyboard(planId),
-  })
+  await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: planDetailKeyboard(planId) })
 }
 
 async function sendPaymentInstructions(bot, chatId, tgUser, planId) {
@@ -123,23 +150,27 @@ async function sendPaymentInstructions(bot, chatId, tgUser, planId) {
       `https://img.vietqr.io/image/${bank.bankName}-${bank.bankAccount}-compact2.png` +
       `?amount=${plan.price}&addInfo=${transferContent}&accountName=${encodeURIComponent(bank.bankOwner)}`
 
-    const text = [
-      `💳 <b>Thông tin thanh toán</b>`,
-      `📦 Gói: <b>${plan.name}</b> — ${plan.duration_days} ngày`,
-      ``,
-      `🏦 Ngân hàng: <b>${bank.bankName}</b>`,
-      `💳 STK: <code>${bank.bankAccount}</code>`,
-      `👤 Chủ TK: <b>${bank.bankOwner}</b>`,
+    const caption = [
+      `💳 <b>THANH TOÁN ĐƠN HÀNG</b>`,
+      DIV,
+      `📦 <b>${plan.name}</b> — ${plan.duration_days} ngày`,
       `💰 Số tiền: <b>${fmtMoney(plan.price)}</b>`,
-      `📝 Nội dung CK: <b><code>${transferContent}</code></b>`,
+      DIV,
+      `<b>① Chuyển khoản tới:</b>`,
+      `   🏦 ${bank.bankName}`,
+      `   💳 <code>${bank.bankAccount}</code>`,
+      `   👤 ${bank.bankOwner}`,
       ``,
-      `⚠️ Chuyển <b>ĐÚNG nội dung CK</b> để hệ thống tự xác nhận.`,
-      `⏳ Bot kiểm tra mỗi 15 giây, hết hạn sau 10 phút.`,
+      `<b>② Nội dung chuyển khoản:</b>`,
+      `   📝 <code>${transferContent}</code>`,
+      `   <i>(Nhấn để copy)</i>`,
+      DIV,
+      `⚠️ Chuyển <b>ĐÚNG nội dung</b> — hệ thống tự xác nhận trong ~20 giây.`,
     ].join('\n')
 
     const opts = { parse_mode: 'HTML', reply_markup: paymentKeyboard(transferContent) }
-    await bot.sendPhoto(chatId, qrUrl, { caption: text, ...opts })
-      .catch(() => bot.sendMessage(chatId, text, opts))
+    await bot.sendPhoto(chatId, qrUrl, { caption, ...opts })
+      .catch(() => bot.sendMessage(chatId, caption, opts))
 
     startPoller(bot, chatId, transferContent)
   } catch (err) {
@@ -152,23 +183,33 @@ async function sendMyOrders(bot, chatId, tgUserId) {
   try {
     const profile = await col('profiles').findOne({ tg_user_id: String(tgUserId) })
     if (!profile) {
-      return bot.sendMessage(chatId, '📭 Bạn chưa có đơn nào.', { reply_markup: mainMenuKeyboard() })
+      return bot.sendMessage(chatId,
+        `📭 <b>Chưa có đơn nào</b>\n\nMua gói đầu tiên ngay!`,
+        { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+      )
     }
 
     const subs = await getUserSubscriptions(profile.id)
     if (!subs.length) {
-      return bot.sendMessage(chatId, '📭 Bạn chưa có đơn nào.', { reply_markup: mainMenuKeyboard() })
+      return bot.sendMessage(chatId,
+        `📭 <b>Chưa có đơn nào</b>\n\nMua gói đầu tiên ngay!`,
+        { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+      )
     }
 
     const lines = subs.map((s, i) => {
       const badge = STATUS_BADGE[s.status] || '❓'
-      const parts = [`${i + 1}. ${badge} <b>${s.plan_name}</b>`, `   Hết hạn: ${fmtDate(s.end_at)}`]
-      if (s.login_link && s.status === 'active') parts.push(`   🔑 <code>${s.login_link}</code>`)
+      const days = s.end_at ? Math.ceil((new Date(s.end_at) - Date.now()) / 86400000) : 0
+      const daysText = days > 0 ? `còn <b>${days} ngày</b>` : `<i>hết hạn</i>`
+      const parts = [`${i + 1}. ${badge} <b>${s.plan_name}</b> — ${daysText}`]
+      if (s.login_link && s.status === 'active') {
+        parts.push(`   🔑 <code>${s.login_link}</code>`)
+      }
       return parts.join('\n')
     })
 
     await bot.sendMessage(chatId,
-      `📋 <b>Đơn của bạn (${subs.length} gần nhất):</b>\n\n${lines.join('\n\n')}`,
+      [`📋 <b>ĐƠN CỦA BẠN</b>`, DIV, lines.join('\n\n'), DIV].join('\n'),
       { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
     )
   } catch (err) {
@@ -182,17 +223,20 @@ async function sendWarrantyMenu(bot, chatId, tgUserId) {
   try {
     const profile = await col('profiles').findOne({ tg_user_id: String(tgUserId) })
     if (!profile) {
-      return bot.sendMessage(chatId, '📭 Bạn chưa có đơn active nào.', { reply_markup: mainMenuKeyboard() })
+      return bot.sendMessage(chatId,
+        `📭 <b>Không có đơn active</b>\n\nMua gói trước để sử dụng tính năng này.`,
+        { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+      )
     }
     const subs = await getUserActiveSubs(profile.id)
     if (!subs.length) {
       return bot.sendMessage(chatId,
-        '📭 Bạn không có đơn nào còn hạn.',
-        { reply_markup: mainMenuKeyboard() }
+        `📭 <b>Không có đơn active</b>\n\nTất cả đơn của bạn đã hết hạn.`,
+        { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
       )
     }
     await bot.sendMessage(chatId,
-      '🔧 <b>Bảo hành / Báo lỗi</b>\n\nChọn đơn cần xử lý:',
+      [`🔧 <b>BẢO HÀNH / BÁO LỖI</b>`, DIV, `Chọn đơn cần xử lý:`].join('\n'),
       { parse_mode: 'HTML', reply_markup: activeSubsKeyboard(subs) }
     )
   } catch (err) {
@@ -202,23 +246,28 @@ async function sendWarrantyMenu(bot, chatId, tgUserId) {
 }
 
 async function handleClaimWarranty(bot, chatId, subId, userId) {
-  await bot.sendMessage(chatId, '⏳ Đang kiểm tra tài khoản...')
+  const loading = await bot.sendMessage(chatId, '⏳ Đang kiểm tra tài khoản...')
   try {
     const data = await callServerAPI('POST', '/api/claim-warranty', { subscription_id: subId }, userId)
+    await bot.deleteMessage(chatId, loading.message_id).catch(() => {})
     if (data.login_link) {
       await bot.sendMessage(chatId,
-        `✅ <b>Đã đổi tài khoản mới!</b>\n\n🔑 <code>${data.login_link}</code>\n\nGõ /myorders để xem chi tiết.`,
+        [`✅ <b>ĐÃ ĐỔI TÀI KHOẢN MỚI!</b>`, DIV, `🔑 <code>${data.login_link}</code>`, DIV, `<i>Nhấn vào thông tin đăng nhập để copy</i>`].join('\n'),
         { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
       )
     } else {
       await bot.sendMessage(chatId,
-        `ℹ️ ${data.message || 'Tài khoản vẫn hoạt động tốt, không cần đổi.'}`,
-        { reply_markup: mainMenuKeyboard() }
+        [`ℹ️ <b>Không thể đổi tài khoản</b>`, DIV, data.message || 'Tài khoản vẫn hoạt động tốt.'].join('\n'),
+        { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
       )
     }
   } catch (err) {
-    const msg = err.response?.data?.error || err.message || 'Lỗi không xác định'
-    await bot.sendMessage(chatId, `❌ ${msg}`, { reply_markup: mainMenuKeyboard() })
+    await bot.deleteMessage(chatId, loading.message_id).catch(() => {})
+    const msg = err.response?.data?.error || 'Lỗi không xác định'
+    await bot.sendMessage(chatId,
+      [`❌ <b>Không thể xử lý</b>`, DIV, msg].join('\n'),
+      { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+    )
   }
 }
 
@@ -226,12 +275,15 @@ async function handleReportIssue(bot, chatId, subId, userId) {
   try {
     await callServerAPI('POST', '/api/report-cannot-view', { subscription_id: subId }, userId)
     await bot.sendMessage(chatId,
-      `✅ <b>Đã gửi báo cáo!</b>\n\nAdmin sẽ kiểm tra và phản hồi trong vòng 24h.\nGõ /start để quay lại menu.`,
+      [`✅ <b>ĐÃ GỬI BÁO CÁO</b>`, DIV, `Admin sẽ kiểm tra và phản hồi trong <b>24h</b>.`, ``, `Bạn sẽ nhận thông báo khi có kết quả.`].join('\n'),
       { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
     )
   } catch (err) {
-    const msg = err.response?.data?.error || err.message || 'Lỗi không xác định'
-    await bot.sendMessage(chatId, `❌ ${msg}`, { reply_markup: mainMenuKeyboard() })
+    const msg = err.response?.data?.error || 'Lỗi không xác định'
+    await bot.sendMessage(chatId,
+      [`❌ <b>Không thể gửi báo cáo</b>`, DIV, msg].join('\n'),
+      { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() }
+    )
   }
 }
 
@@ -240,7 +292,7 @@ function registerHandlers(bot) {
   bot.onText(/\/start/, async (msg) => {
     const chatId = String(msg.chat.id)
     clearState(chatId)
-    await sendMain(bot, chatId)
+    await sendMain(bot, chatId, msg.from?.first_name)
   })
 
   bot.onText(/\/myorders/, async (msg) => {
@@ -253,7 +305,7 @@ function registerHandlers(bot) {
     await bot.answerCallbackQuery(query.id).catch(() => {})
 
     if (data === 'noop') return
-    if (data === 'cb_home') return sendMain(bot, chatId)
+    if (data === 'cb_home') return sendMain(bot, chatId, query.from?.first_name)
     if (data === 'cb_plans') { clearState(chatId); return sendPlans(bot, chatId) }
     if (data === 'cb_status') return sendMyOrders(bot, chatId, query.from.id)
     if (data === 'cb_warranty_menu') return sendWarrantyMenu(bot, chatId, query.from.id)
