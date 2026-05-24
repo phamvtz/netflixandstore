@@ -3,6 +3,19 @@
 module.exports = {
   apps: [
     {
+      name: 'bot',
+      script: 'bot.cjs',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '256M',
+      env: { NODE_ENV: 'production' },
+      out_file: './logs/bot.out.log',
+      error_file: './logs/bot.error.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      merge_logs: true,
+    },
+    {
       name: 'netflix-store',
       script: 'server.cjs',
       node_args: ['--tls-max-v1.2', '--openssl-config=openssl.cnf'],

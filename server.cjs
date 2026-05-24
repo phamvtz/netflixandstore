@@ -4983,6 +4983,15 @@ app.post('/api/admin/fulfill-subscription', requireAdmin, async (req, res) => {
     await sendActivationEmail(subscription_id, login_link, plan?.name || 'Netflix Riêng', days, cfg).catch(() => {})
 
     sendTelegram(`✅ Admin đã giao đơn thủ công\n📦 Gói: ${plan?.name || sub.plan}\n👤 User: ${sub.user_id}`)
+    if (sub.tg_chat_id) {
+      sendTelegramWithToken(TG_TOKEN, sub.tg_chat_id,
+        `✅ <b>Đơn của bạn đã được giao!</b>\n` +
+        `📦 Gói: <b>${plan?.name || sub.plan}</b>\n` +
+        `🔑 Thông tin đăng nhập:\n<code>${login_link}</code>\n` +
+        `📅 Hết hạn: <b>${end.toLocaleDateString('vi-VN')}</b>\n\n` +
+        `Gõ /myorders để xem lại đơn.`
+      ).catch(() => {})
+    }
     res.json({ ok: true })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
